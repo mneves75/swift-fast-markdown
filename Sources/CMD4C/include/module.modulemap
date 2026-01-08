@@ -1,0 +1,4 @@
+module CMD4C [system] {
+    header "../md4c.h"
+    export *
+}
