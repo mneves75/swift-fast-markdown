@@ -1,0 +1,15 @@
+{
+  "originHash" : "ec72993b304f53c8e0943d27747c1ec8a57d628923d15dbd5c4563c65932537d",
+  "pins" : [
+    {
+      "identity" : "highlighterswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/smittytone/HighlighterSwift.git",
+      "state" : {
+        "revision" : "a729b06c1c9c470482d5bf8641dd8b5cb3f345f4",
+        "version" : "2.0.0"
+      }
+    }
+  ],
+  "version" : 3
+}
