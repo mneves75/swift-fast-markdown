@@ -5,6 +5,30 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-01-09
+
+### Added
+
+- **Demo App**: Comprehensive 6-tab demo showcasing 100% of markdown features
+  - All Features tab: Tests all 22 block types and inline spans (H1-H6, bold, italic, strikethrough, code, links, lists, tables, quotes, thematic breaks, Unicode edge cases)
+  - Editor tab: Live split-view markdown editing with real-time preview
+  - Cross-platform support for iOS 18+ and macOS 15+
+  - SwiftUI best practices: #Preview macros, dark mode, accessibility testing
+
+- **Engineering Spec**: Carmack-level documentation at `docs/plans/DEMO_APP_ENGINEERING_SPEC.md`
+  - Code review findings with safety verification
+  - Feature gap analysis (73% → 100% coverage)
+  - Implementation phases and verification checklist
+
+### Fixed
+
+- **iOS Compatibility**: Replaced HighlighterSwift with Highlightr
+  - HighlighterSwift was macOS-only due to AppKit dependencies
+  - Highlightr provides cross-platform syntax highlighting for iOS/macOS
+
+- **SwiftUI Colors**: Fixed cross-platform color resolution in EditorDemo
+  - Uses conditional compilation for UIColor (iOS) vs native SwiftUI colors (macOS)
+
 ## [1.0.1] - 2026-01-08
 
 ### Fixed
