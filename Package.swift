@@ -19,7 +19,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/smittytone/HighlighterSwift.git", from: "2.0.0")
+        .package(url: "https://github.com/raspu/Highlightr.git", from: "2.3.0")
     ],
     targets: [
         .target(
@@ -31,7 +31,7 @@ let package = Package(
             name: "SwiftFastMarkdown",
             dependencies: [
                 "CMD4C",
-                .product(name: "Highlighter", package: "HighlighterSwift")
+                .product(name: "Highlightr", package: "Highlightr")
             ],
             path: "Sources/SwiftFastMarkdown",
             resources: [
