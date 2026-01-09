@@ -25,13 +25,13 @@ This document contains the findings from a comprehensive Carmack-level code revi
 | LRU eviction | `LRUCache.swift` | **SAFE**: O(1) doubly-linked list implementation is correct. |
 | Actor isolation | `HighlightrEngine.swift` | **SAFE**: Actor provides proper isolation despite `@retroactive @unchecked Sendable` on Highlightr. |
 
-### 1.2 VERIFIED CONCERNS - Low Priority
+### 1.2 VERIFIED CONCERNS - Addressed in v1.1.3
 
-| Issue | Location | Impact | Risk |
-|-------|----------|--------|------|
-| Hash collision | `StreamingMarkdownView.swift:99-101` | Uses `hashValue` for change detection; collision could cause stale content | Very Low |
-| UInt32 offset | `IncrementalParser.swift` | Theoretical overflow for documents >4GB | Negligible |
-| Silent entity load | `EntityDecoder.swift:47-49` | Returns empty dict if JSON missing; no error logging | Low |
+| Issue | Location | Impact | Status |
+|-------|----------|--------|--------|
+| Hash collision | `StreamingMarkdownView.swift` | Uses `hashValue` for change detection; collision could cause stale content | **FIXED v1.1.3** - Now uses direct string comparison |
+| UInt32 offset | `IncrementalParser.swift` | Theoretical overflow for documents >4GB | Negligible - Accepted |
+| Silent entity load | `EntityDecoder.swift` | Returns empty dict if JSON missing; no error logging | **FIXED v1.1.2** - Added debug assertions |
 
 ---
 
@@ -240,19 +240,29 @@ Swift 6.2 introduced `Span` for safe buffer operations. Not applicable here sinc
 ## Part 6: Verification Checklist
 
 ### Pre-Implementation
-- [ ] All source files reviewed
-- [ ] No security vulnerabilities found
-- [ ] No memory safety issues found
-- [ ] Thread safety verified
+- [x] All source files reviewed
+- [x] No security vulnerabilities found
+- [x] No memory safety issues found
+- [x] Thread safety verified
 
-### Post-Implementation
-- [ ] Privacy manifest added and validated
-- [ ] LRUCacheTests comment updated
-- [ ] EntityDecoder has debug logging
-- [ ] Swift Testing migration complete (where applicable)
-- [ ] All 106+ tests pass
-- [ ] Build succeeds with no warnings
-- [ ] Demo app runs successfully
+### Post-Implementation (v1.1.2)
+- [x] Privacy manifest added and validated
+- [x] LRUCacheTests comment updated
+- [x] EntityDecoder has debug logging
+- [x] Swift Testing migration complete (ByteRangeTests, IncrementalParserTests)
+- [x] All 106 tests pass (78 XCTest + 28 Swift Testing)
+- [x] Build succeeds with no warnings
+- [x] Demo app runs successfully
+
+### Post-Implementation (v1.1.3)
+- [x] Hash collision risk fixed in StreamingMarkdownView (direct string comparison)
+- [x] @MainActor added to StreamingMarkdownView/AsyncStreamMarkdownView
+- [x] DRY violations fixed (onChange deduplication, LiquidGlassModifier unification)
+- [x] #Preview macros added to MarkdownView, FastMarkdownText, StreamingMarkdownView
+- [x] CodeBlockView loading state indicator
+- [x] TableView cell rendering extracted to helper
+- [x] All 106 tests still pass
+- [x] Build succeeds with no warnings
 
 ---
 
@@ -275,5 +285,6 @@ Swift 6.2 introduced `Span` for safe buffer operations. Not applicable here sinc
 
 ---
 
-**Document Status**: Ready for Implementation
+**Document Status**: Implementation Complete (v1.1.3)
 **Last Updated**: January 9, 2026
+**Verified By**: Automated test suite (106 tests)

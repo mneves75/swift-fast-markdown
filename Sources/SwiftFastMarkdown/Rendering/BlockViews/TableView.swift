@@ -12,13 +12,7 @@ struct TableView: View {
                 ForEach(block.headerRows) { row in
                     GridRow {
                         ForEach(row.cells) { cell in
-                            InlineText(
-                                spans: cell.spans,
-                                source: source,
-                                style: style,
-                                fontOverride: style.baseFont.bold()
-                            )
-                            .gridColumnAlignment(horizontalAlignment(for: cell.alignment))
+                            cellView(for: cell, isHeader: true)
                         }
                     }
                 }
@@ -36,13 +30,7 @@ struct TableView: View {
                 ForEach(block.bodyRows) { row in
                     GridRow {
                         ForEach(row.cells) { cell in
-                            InlineText(
-                                spans: cell.spans,
-                                source: source,
-                                style: style,
-                                fontOverride: style.baseFont
-                            )
-                            .gridColumnAlignment(horizontalAlignment(for: cell.alignment))
+                            cellView(for: cell, isHeader: false)
                         }
                     }
                 }
@@ -50,6 +38,18 @@ struct TableView: View {
             .padding(12)
         }
         .liquidGlassSurface(cornerRadius: 12)
+    }
+
+    /// Renders a table cell with appropriate styling for header vs body rows.
+    @ViewBuilder
+    private func cellView(for cell: TableCell, isHeader: Bool) -> some View {
+        InlineText(
+            spans: cell.spans,
+            source: source,
+            style: style,
+            fontOverride: isHeader ? style.baseFont.bold() : style.baseFont
+        )
+        .gridColumnAlignment(horizontalAlignment(for: cell.alignment))
     }
 
     private var columnCount: Int {

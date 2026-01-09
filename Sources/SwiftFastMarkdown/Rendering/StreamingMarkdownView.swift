@@ -21,6 +21,7 @@ import SwiftUI
 ///     }
 /// }
 /// ```
+@MainActor
 public struct StreamingMarkdownView: View {
     @Binding private var content: String
     private let style: MarkdownStyle
@@ -30,7 +31,10 @@ public struct StreamingMarkdownView: View {
 
     @State private var parser: IncrementalMarkdownParser
     @State private var document: MarkdownDocument
-    @State private var lastContentHash: Int = 0
+    /// Tracks the last processed content to avoid redundant reparsing.
+    /// Note: Using direct string comparison instead of hashValue to prevent
+    /// hash collisions from causing missed updates.
+    @State private var lastProcessedContent: String = ""
 
     public init(
         content: Binding<String>,
@@ -52,20 +56,22 @@ public struct StreamingMarkdownView: View {
     }
 
     public var body: some View {
-        // On iOS 26+, wrap in GlassEffectContainer for proper glass blending
-        // between code blocks, block quotes, and tables with glass surfaces.
+        wrappedContentStack
+            .onChange(of: content) { oldValue, newValue in
+                updateDocument(from: oldValue, to: newValue)
+            }
+    }
+
+    /// Wraps contentStack in GlassEffectContainer on iOS 26+ for proper glass blending
+    /// between code blocks, block quotes, and tables with glass surfaces.
+    @ViewBuilder
+    private var wrappedContentStack: some View {
         if #available(iOS 26, macOS 26, *) {
             GlassEffectContainer(spacing: CGFloat(style.blockSpacing) * 4.0) {
                 contentStack
             }
-            .onChange(of: content) { oldValue, newValue in
-                updateDocument(from: oldValue, to: newValue)
-            }
         } else {
             contentStack
-                .onChange(of: content) { oldValue, newValue in
-                    updateDocument(from: oldValue, to: newValue)
-                }
         }
     }
 
@@ -96,9 +102,10 @@ public struct StreamingMarkdownView: View {
     }
 
     private func updateDocument(from oldValue: String, to newValue: String) {
-        let newHash = newValue.hashValue
-        guard newHash != lastContentHash else { return }
-        lastContentHash = newHash
+        // Direct string comparison prevents hash collision edge cases where
+        // different content could produce the same hashValue, causing missed updates.
+        guard newValue != lastProcessedContent else { return }
+        lastProcessedContent = newValue
 
         if newValue.isEmpty {
             // Content cleared - reset parser
@@ -171,6 +178,7 @@ extension StreamingMarkdownView {
 // MARK: - AsyncStream Support
 
 /// A view that renders markdown from an AsyncStream of content chunks.
+@MainActor
 public struct AsyncStreamMarkdownView<S: AsyncSequence>: View where S.Element == String {
     private let stream: S
     private let style: MarkdownStyle
@@ -210,5 +218,37 @@ public struct AsyncStreamMarkdownView<S: AsyncSequence>: View where S.Element ==
             }
             isStreaming = false
         }
+    }
+}
+
+// MARK: - Previews
+
+@available(iOS 18, macOS 15, *)
+#Preview("StreamingMarkdownView") {
+    @Previewable @State var content = """
+    # Streaming Demo
+
+    This demonstrates **real-time** markdown rendering.
+
+    ```swift
+    let view = StreamingMarkdownView(content: $content)
+    ```
+
+    > Perfect for AI chat interfaces!
+    """
+
+    ScrollView {
+        StreamingMarkdownView(content: $content, isStreaming: false)
+            .padding()
+    }
+}
+
+@available(iOS 18, macOS 15, *)
+#Preview("StreamingMarkdownView - Static") {
+    ScrollView {
+        StreamingMarkdownView(
+            staticContent: "Hello **world**! This uses the static initializer."
+        )
+        .padding()
     }
 }

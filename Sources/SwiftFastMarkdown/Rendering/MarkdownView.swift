@@ -1,5 +1,9 @@
 import SwiftUI
 
+/// A SwiftUI view that renders a parsed markdown document.
+///
+/// Use `MarkdownParser` to parse markdown content into a `MarkdownDocument`,
+/// then pass it to this view for rich rendering with syntax highlighting.
 public struct MarkdownView: View {
     private let document: MarkdownDocument
     private let style: MarkdownStyle
@@ -42,6 +46,37 @@ public struct MarkdownView: View {
                     onToggleTask: onToggleTask
                 )
             }
+        }
+    }
+}
+
+// MARK: - Preview
+
+@available(iOS 18, macOS 15, *)
+#Preview("MarkdownView") {
+    let sampleMarkdown = """
+    # Welcome to SwiftFastMarkdown
+
+    A **high-performance** markdown renderer for SwiftUI.
+
+    ## Features
+
+    - Zero-copy parsing with ByteRange IR
+    - Syntax highlighting for code blocks
+    - iOS 26 Liquid Glass effects
+
+    ```swift
+    let parser = MarkdownParser()
+    let doc = try parser.parse(markdown)
+    ```
+
+    > Quote: *Clarity over cleverness*
+    """
+
+    if let doc = try? MarkdownParser().parse(sampleMarkdown) {
+        ScrollView {
+            MarkdownView(document: doc)
+                .padding()
         }
     }
 }
