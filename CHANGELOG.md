@@ -5,6 +5,16 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-01-09
+
+### Fixed
+
+- **iOS Simulator Crash**: Fixed assertion failure in `MD4CParser.pointerRange()`
+  - Crash occurred when md4c passed pointers outside the original buffer on iOS
+  - Added bounds validation to prevent integer overflow when computing byte offsets
+  - The parser now gracefully handles edge cases where text pointers are invalid
+  - Enables SwiftUI demo app to run successfully on iOS Simulator
+
 ## [1.1.3] - 2026-01-09
 
 ### Added
