@@ -163,11 +163,23 @@ private final class ParserContext {
             return nil
         }
         // md4c passes raw pointers into the original buffer; compute byte offsets from the base.
-        let base = Int(bitPattern: basePointer)
-        let ptr = Int(bitPattern: text)
-        let offset = max(0, ptr - base)
+        // First, verify the pointer is within bounds to prevent overflow/crash.
+        let baseAddress = Int(bitPattern: basePointer)
+        let textAddress = Int(bitPattern: text)
+
+        // Check if text pointer is within the buffer range
+        guard textAddress >= baseAddress else {
+            return nil
+        }
+
+        let offset = textAddress - baseAddress
         let end = offset + Int(size)
-        guard end >= offset else { return nil }
+
+        // Guard against overflow and ensure end doesn't exceed buffer
+        guard offset >= 0, end >= offset, end <= sourceData.count else {
+            return nil
+        }
+
         return ByteRange(start: UInt32(offset), end: UInt32(end))
     }
 
