@@ -83,8 +83,8 @@ private final class ParserContext {
             blockStack[last] = .doc(blocks: blocks + [block])
         case .blockQuote(let blocks):
             blockStack[last] = .blockQuote(blocks: blocks + [block])
-        case .listItem(let isTask, let isChecked, let blocks):
-            blockStack[last] = .listItem(isTask: isTask, isChecked: isChecked, blocks: blocks + [block])
+        case .listItem(let isTask, let isChecked, let blocks, let hasImplicitParagraph):
+            blockStack[last] = .listItem(isTask: isTask, isChecked: isChecked, blocks: blocks + [block], hasImplicitParagraph: hasImplicitParagraph)
         default:
             // If the current container cannot accept blocks, append to nearest parent.
             if let parentIndex = blockStack.lastIndex(where: { $0.acceptsChildBlocks }) {
@@ -93,8 +93,8 @@ private final class ParserContext {
                     blockStack[parentIndex] = .doc(blocks: blocks + [block])
                 case .blockQuote(let blocks):
                     blockStack[parentIndex] = .blockQuote(blocks: blocks + [block])
-                case .listItem(let isTask, let isChecked, let blocks):
-                    blockStack[parentIndex] = .listItem(isTask: isTask, isChecked: isChecked, blocks: blocks + [block])
+                case .listItem(let isTask, let isChecked, let blocks, let hasImplicitParagraph):
+                    blockStack[parentIndex] = .listItem(isTask: isTask, isChecked: isChecked, blocks: blocks + [block], hasImplicitParagraph: hasImplicitParagraph)
                 default:
                     break
                 }
@@ -182,6 +182,17 @@ private final class ParserContext {
         Character(UnicodeScalar(UInt8(bitPattern: value)))
     }
 
+    /// Checks if the nearest parent list on the block stack is tight.
+    /// Used to determine if list items need implicit paragraph handling.
+    func isParentListTight() -> Bool {
+        for state in blockStack.reversed() {
+            if case .list(_, _, _, let isTight, _) = state {
+                return isTight
+            }
+        }
+        return false
+    }
+
     // MARK: - Callbacks
 
     static let enterBlockCallback: @convention(c) (MD_BLOCKTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { type, detail, userdata in
@@ -212,7 +223,14 @@ private final class ParserContext {
             let isTask = info?.pointee.is_task != 0
             let mark = info?.pointee.task_mark
             let isChecked = (mark == MD_CHAR(120) || mark == MD_CHAR(88))
-            context.blockStack.append(.listItem(isTask: isTask, isChecked: isChecked, blocks: []))
+
+            // Check if parent list is tight - if so, md4c won't emit paragraph blocks
+            // for list item content, so we need to collect inline content directly.
+            let parentListIsTight = context.isParentListTight()
+            if parentListIsTight {
+                context.beginInlineBlock()
+            }
+            context.blockStack.append(.listItem(isTask: isTask, isChecked: isChecked, blocks: [], hasImplicitParagraph: parentListIsTight))
         case MD_BLOCK_HR:
             context.blockStack.append(.thematicBreak)
         case MD_BLOCK_H:
@@ -282,7 +300,20 @@ private final class ParserContext {
             let list = ListBlock(id: id, ordered: ordered, start: start, delimiter: delimiter, isTight: isTight, items: items)
             context.appendBlock(.list(list))
         case MD_BLOCK_LI:
-            guard case .listItem(let isTask, let isChecked, let blocks) = context.blockStack.popLast() else { return 0 }
+            guard case .listItem(let isTask, let isChecked, var blocks, let hasImplicitParagraph) = context.blockStack.popLast() else { return 0 }
+
+            // For tight lists, we started an implicit inline block to collect content.
+            // Now wrap that content in a paragraph block.
+            if hasImplicitParagraph {
+                let spans = context.endInlineBlock()
+                if !spans.isEmpty {
+                    let paragraphRange = context.computeRange(from: spans)
+                    let paragraphId = context.nextID(kind: .paragraph, range: paragraphRange)
+                    let implicitParagraph = ParagraphBlock(id: paragraphId, spans: spans, range: paragraphRange)
+                    blocks.append(.paragraph(implicitParagraph))
+                }
+            }
+
             let range = rangeFromBlocks(blocks)
             let id = context.nextID(kind: .listItem, range: range)
             let item = ListItemBlock(id: id, blocks: blocks, isTask: isTask, isChecked: isChecked)
@@ -551,7 +582,9 @@ private enum BlockState {
     case doc(blocks: [MarkdownBlock])
     case blockQuote(blocks: [MarkdownBlock])
     case list(ordered: Bool, start: Int, delimiter: Character?, isTight: Bool, items: [ListItemBlock])
-    case listItem(isTask: Bool, isChecked: Bool, blocks: [MarkdownBlock])
+    // hasImplicitParagraph: true when list item is in a tight list and needs
+    // to collect inline content directly (md4c doesn't emit P blocks for tight lists)
+    case listItem(isTask: Bool, isChecked: Bool, blocks: [MarkdownBlock], hasImplicitParagraph: Bool)
     case paragraph
     case heading(level: Int)
     case codeBlock(info: TextContent?, language: TextContent?, fence: Character?, contentRanges: [ByteRange])
