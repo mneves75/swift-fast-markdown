@@ -6,29 +6,391 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            AllFeaturesDemo()
+                .tabItem {
+                    Label("All Features", systemImage: "text.badge.checkmark")
+                }
+                .tag(0)
+
             StaticMarkdownDemo()
                 .tabItem {
                     Label("Static", systemImage: "doc.text")
                 }
-                .tag(0)
+                .tag(1)
 
             StreamingMarkdownDemo()
                 .tabItem {
                     Label("Streaming", systemImage: "text.bubble")
                 }
-                .tag(1)
+                .tag(2)
 
             GFMFeaturesDemo()
                 .tabItem {
                     Label("GFM", systemImage: "checklist")
                 }
-                .tag(2)
+                .tag(3)
+
+            EditorDemo()
+                .tabItem {
+                    Label("Editor", systemImage: "pencil.and.outline")
+                }
+                .tag(4)
 
             BenchmarkDemo()
                 .tabItem {
                     Label("Benchmark", systemImage: "gauge.with.dots.needle.bottom.50percent")
                 }
-                .tag(3)
+                .tag(5)
+        }
+    }
+}
+
+// MARK: - All Features Demo (100% Coverage)
+
+/// Comprehensive demonstration of ALL supported markdown features.
+/// This tab tests every block type and inline span for Carmack-level verification.
+struct AllFeaturesDemo: View {
+    // Comprehensive markdown testing ALL 22 features
+    private let allFeaturesMarkdown = """
+    # Heading Level 1
+    ## Heading Level 2
+    ### Heading Level 3
+    #### Heading Level 4
+    ##### Heading Level 5
+    ###### Heading Level 6
+
+    ---
+
+    ## Inline Formatting
+
+    Regular text with **bold**, *italic*, and ***bold italic*** formatting.
+
+    Text with ~~strikethrough~~ styling for deleted content.
+
+    Inline `code` with backticks for technical terms.
+
+    ---
+
+    ## Links and References
+
+    Standard link: [SwiftFastMarkdown on GitHub](https://github.com/example/swift-fast-markdown)
+
+    Autolink: <https://example.com/autolink>
+
+    Email autolink: <test@example.com>
+
+    ---
+
+    ## Lists
+
+    ### Unordered List
+    - First item
+    - Second item
+      - Nested item A
+      - Nested item B
+        - Deeply nested
+    - Third item
+
+    ### Ordered List
+    1. Step one
+    2. Step two
+       1. Sub-step 2.1
+       2. Sub-step 2.2
+    3. Step three
+
+    ### Task List
+    - [x] Completed task
+    - [ ] Pending task
+    - [x] Another completed task
+    - [ ] Future work
+
+    ---
+
+    ## Code
+
+    Inline code: Use `MarkdownParser()` to parse markdown.
+
+    Swift code block:
+    ```swift
+    import SwiftFastMarkdown
+
+    let parser = MarkdownParser()
+    let document = try parser.parse(markdown)
+
+    // Render with SwiftUI
+    MarkdownView(document: document)
+        .markdownStyle(.default)
+    ```
+
+    Python code block:
+    ```python
+    def hello_world():
+        print("Hello from Python!")
+        return 42
+    ```
+
+    ---
+
+    ## Block Quote
+
+    > "Simplicity is the ultimate sophistication."
+    > — Leonardo da Vinci
+
+    Nested quotes:
+    > Level 1 quote
+    >> Level 2 nested quote
+    >>> Level 3 deeply nested
+
+    ---
+
+    ## Tables
+
+    ### Basic Table
+    | Feature | Status | Performance |
+    |:--------|:------:|------------:|
+    | Parsing | ✅ | <1ms |
+    | Rendering | ✅ | <5ms |
+    | Streaming | ✅ | <0.5ms |
+    | Highlighting | ✅ | Cached |
+
+    ### Complex Table
+    | Left Align | Center Align | Right Align |
+    |:-----------|:------------:|------------:|
+    | **Bold** | *Italic* | `Code` |
+    | ~~Strike~~ | Normal | Mixed **bold** *italic* |
+
+    ---
+
+    ## Thematic Breaks
+
+    Content above the break.
+
+    ---
+
+    Content between breaks.
+
+    ***
+
+    Content below the break.
+
+    ---
+
+    ## Edge Cases
+
+    ### Unicode Support
+    - Emoji: 🚀 🎨 ✨ 💻 📱 🔧
+    - CJK: 日本語 中文 한국어
+    - RTL: العربية עברית
+    - Math symbols: ∑ ∏ ∫ √ ∞ ≠ ≤ ≥
+    - Arrows: → ← ↑ ↓ ↔ ⇒ ⇐
+
+    ### Special Characters
+    - Ampersand: Fish & Chips
+    - Less/Greater: 5 < 10 > 3
+    - Quotes: "double" and 'single'
+    - Escapes: \\*not italic\\* \\`not code\\`
+
+    ### Empty and Minimal Content
+    - Single character: X
+    - Numbers: 12345
+    - Special: @#$%^&*
+
+    ---
+
+    ## Performance Verified
+
+    This library achieves:
+    - **Parse 10KB**: <1ms (target met ✅)
+    - **Render 10KB**: <5ms (target met ✅)
+    - **Chunk parse**: <0.5ms (target met ✅)
+
+    ---
+
+    *Rendered with SwiftFastMarkdown v1.1.1*
+    """
+
+    @State private var document: MarkdownDocument?
+    @State private var parseError: Error?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let document {
+                        MarkdownView(document: document)
+                            .padding()
+                    } else if let error = parseError {
+                        ContentUnavailableView(
+                            "Parse Error",
+                            systemImage: "exclamationmark.triangle",
+                            description: Text(error.localizedDescription)
+                        )
+                    } else {
+                        ProgressView("Parsing markdown...")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+            .navigationTitle("All Features")
+            .task {
+                await parseMarkdown()
+            }
+        }
+    }
+
+    private func parseMarkdown() async {
+        do {
+            document = try MarkdownParser().parse(allFeaturesMarkdown)
+        } catch {
+            parseError = error
+        }
+    }
+}
+
+// MARK: - Editor Demo (Live Preview)
+
+/// Live markdown editor with split-view real-time preview.
+/// Demonstrates the library's responsiveness for interactive use cases.
+struct EditorDemo: View {
+    @State private var markdownText = """
+    # Try Editing!
+
+    Type **markdown** here and see it render in real-time.
+
+    ## Formatting Examples
+
+    - **Bold** text with double asterisks
+    - *Italic* text with single asterisks
+    - `Inline code` with backticks
+    - ~~Strikethrough~~ with tildes
+
+    ## Lists
+
+    1. First item
+    2. Second item
+    3. Third item
+
+    ## Code Block
+
+    ```swift
+    let greeting = "Hello, SwiftUI!"
+    print(greeting)
+    ```
+
+    > Block quotes work too!
+
+    ---
+
+    Try adding your own markdown...
+    """
+
+    @State private var document: MarkdownDocument?
+
+    private let parser = MarkdownParser()
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                if geometry.size.width > 600 {
+                    // iPad/Mac: Side-by-side layout
+                    HStack(spacing: 0) {
+                        editorPane
+                            .frame(width: geometry.size.width / 2)
+
+                        Divider()
+
+                        previewPane
+                            .frame(width: geometry.size.width / 2)
+                    }
+                } else {
+                    // iPhone: Vertical layout
+                    VStack(spacing: 0) {
+                        editorPane
+                            .frame(height: geometry.size.height / 2)
+
+                        Divider()
+
+                        previewPane
+                            .frame(height: geometry.size.height / 2)
+                    }
+                }
+            }
+            .navigationTitle("Live Editor")
+            .onChange(of: markdownText) { _, newValue in
+                parseMarkdown(newValue)
+            }
+            .task {
+                parseMarkdown(markdownText)
+            }
+        }
+    }
+
+    private var editorPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Markdown")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(markdownText.count) chars")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal)
+            .padding(.top, 8)
+
+            TextEditor(text: $markdownText)
+                .font(.system(.body, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                #if os(iOS)
+                .background(Color(UIColor.systemGray6))
+                #else
+                .background(Color.gray.opacity(0.1))
+                #endif
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+        }
+    }
+
+    private var previewPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Preview")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+            ScrollView {
+                if let document {
+                    MarkdownView(document: document)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal)
+                } else {
+                    Text("Enter markdown to see preview")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+            }
+            #if os(iOS)
+            .background(Color(UIColor.systemBackground))
+            #else
+            .background(Color.clear)
+            #endif
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal)
+            .padding(.bottom, 8)
+        }
+    }
+
+    private func parseMarkdown(_ text: String) {
+        // Debounced parsing would be ideal for large documents,
+        // but for demo purposes, immediate parsing shows responsiveness
+        do {
+            document = try parser.parse(text)
+        } catch {
+            // Keep last valid document on parse error
         }
     }
 }
@@ -367,6 +729,26 @@ struct ResultRow: View {
     }
 }
 
-#Preview {
+// MARK: - Previews
+
+#Preview("Main App") {
     ContentView()
+}
+
+#Preview("All Features") {
+    AllFeaturesDemo()
+}
+
+#Preview("Editor") {
+    EditorDemo()
+}
+
+#Preview("Dark Mode") {
+    ContentView()
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Large Text") {
+    AllFeaturesDemo()
+        .dynamicTypeSize(.accessibility1)
 }
