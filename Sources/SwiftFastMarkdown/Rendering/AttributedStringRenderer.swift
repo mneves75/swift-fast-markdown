@@ -76,11 +76,15 @@ public struct AttributedStringRenderer {
         case .text(let content):
             return applyBaseAttributes(AttributedString(content.string(in: source)), font: fontOverride, color: style.textColor)
         case .emphasis(let children):
-            var attributed = renderInline(children, source: source, style: style, fontOverride: fontOverride)
+            // Apply italic font trait for visual styling
+            let italicFont = fontOverride.italic()
+            var attributed = renderInline(children, source: source, style: style, fontOverride: italicFont)
             attributed.inlinePresentationIntent = .emphasized
             return attributed
         case .strong(let children):
-            var attributed = renderInline(children, source: source, style: style, fontOverride: fontOverride)
+            // Apply bold font trait for visual styling
+            let boldFont = fontOverride.bold()
+            var attributed = renderInline(children, source: source, style: style, fontOverride: boldFont)
             attributed.inlinePresentationIntent = .stronglyEmphasized
             return attributed
         case .strikethrough(let children):
