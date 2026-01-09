@@ -5,6 +5,42 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-01-09
+
+### Added
+
+- **#Preview Macros**: Added SwiftUI previews to all public views
+  - `MarkdownView`: Rich document preview with code blocks and formatting
+  - `FastMarkdownText`: Simple AttributedString-based preview
+  - `StreamingMarkdownView`: Live streaming and static content previews
+  - Uses `@Previewable` for stateful preview bindings
+
+- **CodeBlockView Loading State**: Visual feedback during syntax highlighting
+  - Shows subtle `ProgressView` indicator while highlighting computes
+  - Transitions smoothly when highlighting completes
+
+### Changed
+
+- **StreamingMarkdownView Refactor**: Eliminated DRY violations and improved safety
+  - Replaced hash-based change detection with direct string comparison (prevents hash collisions)
+  - Added `@MainActor` annotation for Swift 6 concurrency compliance
+  - Extracted `wrappedContentStack` to eliminate duplicated `onChange` modifier
+
+- **LiquidGlassSurface Unification**: Single parameterized modifier replaces two near-identical structs
+  - `LiquidGlassModifier<M: ShapeStyle>` accepts configurable fallback material and border opacity
+  - API unchanged: `liquidGlassSurface()` and `liquidGlassProminentSurface()` still work
+  - Eliminates ~30 lines of duplicated code
+
+- **TableView Cell Extraction**: DRY refactor for cell rendering
+  - Extracted `cellView(for:isHeader:)` helper method
+  - Unifies header and body cell rendering logic
+
+### Fixed
+
+- **Hash Collision Risk**: StreamingMarkdownView now uses direct string comparison
+  - Previous `hashValue` comparison could silently skip updates on collision
+  - New approach guarantees correct change detection
+
 ## [1.1.2] - 2026-01-09
 
 ### Added

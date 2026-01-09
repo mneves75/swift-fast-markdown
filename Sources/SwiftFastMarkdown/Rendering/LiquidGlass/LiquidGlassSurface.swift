@@ -56,12 +56,18 @@ struct GlassEffectContainer<Content: View>: View {
 
 // MARK: - Liquid Glass Surface
 
-/// A view modifier that applies Liquid Glass effect on iOS 26+ with material fallback for earlier versions.
+/// Unified view modifier for Liquid Glass effects with configurable fallback materials.
 ///
 /// On iOS 26+: Uses the native `.glassEffect(.regular)` API for authentic translucent materials.
-/// On iOS 18-25: Falls back to `.ultraThinMaterial` with a subtle border overlay.
-struct LiquidGlassSurface: ViewModifier {
+/// On earlier versions: Falls back to the specified material with a subtle border overlay.
+///
+/// Note: This uses `.glassEffect(.regular)` without `.interactive()` because
+/// these are display surfaces, not tappable elements. Per Apple guidelines,
+/// `.interactive()` should only be used for buttons and focusable controls.
+private struct LiquidGlassModifier<M: ShapeStyle>: ViewModifier {
     let cornerRadius: CGFloat
+    let fallbackMaterial: M
+    let borderOpacity: CGFloat
 
     func body(content: Content) -> some View {
         content
@@ -77,41 +83,10 @@ struct LiquidGlassSurface: ViewModifier {
                 .glassEffect(.regular)
         } else {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(fallbackMaterial)
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.08))
-                )
-        }
-    }
-}
-
-/// A view modifier for prominent glass surfaces (e.g., cards, callouts).
-///
-/// Note: This uses `.glassEffect(.regular)` without `.interactive()` because
-/// these are display surfaces, not tappable elements. Per Apple guidelines,
-/// `.interactive()` should only be used for buttons and focusable controls.
-struct LiquidGlassProminentSurface: ViewModifier {
-    let cornerRadius: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            .background {
-                prominentBackground
-            }
-    }
-
-    @ViewBuilder
-    private var prominentBackground: some View {
-        if #available(iOS 26, macOS 26, *) {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .glassEffect(.regular)
-        } else {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.12))
+                        .strokeBorder(.white.opacity(borderOpacity))
                 )
         }
     }
@@ -126,14 +101,24 @@ extension View {
     /// On iOS 26+, this uses the native `glassEffect(.regular)` API.
     /// On earlier versions, it falls back to `.ultraThinMaterial`.
     func liquidGlassSurface(cornerRadius: CGFloat = 12) -> some View {
-        modifier(LiquidGlassSurface(cornerRadius: cornerRadius))
+        modifier(LiquidGlassModifier(
+            cornerRadius: cornerRadius,
+            fallbackMaterial: .ultraThinMaterial,
+            borderOpacity: 0.08
+        ))
     }
 
     /// Applies a prominent Liquid Glass surface effect for elevated UI elements.
     ///
     /// - Parameter cornerRadius: The corner radius for the rounded rectangle background. Default is 12.
     /// - Returns: A view with the prominent Liquid Glass surface applied.
+    ///
+    /// Uses `.regularMaterial` as fallback (more opaque than standard glass surface).
     func liquidGlassProminentSurface(cornerRadius: CGFloat = 12) -> some View {
-        modifier(LiquidGlassProminentSurface(cornerRadius: cornerRadius))
+        modifier(LiquidGlassModifier(
+            cornerRadius: cornerRadius,
+            fallbackMaterial: .regularMaterial,
+            borderOpacity: 0.12
+        ))
     }
 }
