@@ -1,90 +1,91 @@
-import XCTest
+import Foundation
+import Testing
 @testable import SwiftFastMarkdown
 
 /// Tests for ByteRange and zero-copy string extraction.
-final class ByteRangeTests: XCTestCase {
+struct ByteRangeTests {
 
     // MARK: - ByteRange Basic Operations
 
-    func testByteRangeEquality() {
+    @Test func byteRangeEquality() {
         let a = ByteRange(start: 0, end: 10)
         let b = ByteRange(start: 0, end: 10)
         let c = ByteRange(start: 0, end: 11)
 
-        XCTAssertEqual(a, b)
-        XCTAssertNotEqual(a, c)
+        #expect(a == b)
+        #expect(a != c)
     }
 
-    func testByteRangeIsEmpty() {
+    @Test func byteRangeIsEmpty() {
         let empty = ByteRange(start: 5, end: 5)
         let nonEmpty = ByteRange(start: 5, end: 10)
 
-        XCTAssertTrue(empty.isEmpty)
-        XCTAssertFalse(nonEmpty.isEmpty)
+        #expect(empty.isEmpty)
+        #expect(!nonEmpty.isEmpty)
     }
 
-    func testByteRangeLength() {
+    @Test func byteRangeLength() {
         let range = ByteRange(start: 10, end: 25)
-        XCTAssertEqual(range.length, 15 as UInt32)
+        #expect(range.length == 15 as UInt32)
     }
 
     // MARK: - String Extraction
 
-    func testStringExtractionFromData() {
+    @Test func stringExtractionFromData() {
         let data = Data("Hello, World!".utf8)
         let range = ByteRange(start: 0, end: 5)
 
-        XCTAssertEqual(range.string(in: data), "Hello")
+        #expect(range.string(in: data) == "Hello")
     }
 
-    func testStringExtractionMiddle() {
+    @Test func stringExtractionMiddle() {
         let data = Data("Hello, World!".utf8)
         let range = ByteRange(start: 7, end: 12)
 
-        XCTAssertEqual(range.string(in: data), "World")
+        #expect(range.string(in: data) == "World")
     }
 
-    func testStringExtractionEmptyRange() {
+    @Test func stringExtractionEmptyRange() {
         let data = Data("Hello".utf8)
         let range = ByteRange(start: 2, end: 2)
 
-        XCTAssertEqual(range.string(in: data), "")
+        #expect(range.string(in: data) == "")
     }
 
-    func testStringExtractionOutOfBounds() {
+    @Test func stringExtractionOutOfBounds() {
         let data = Data("Hello".utf8)
         let range = ByteRange(start: 0, end: 100)
 
         // Should handle gracefully (empty or truncated)
         let result = range.string(in: data)
-        XCTAssertTrue(result.isEmpty || result.count <= 5)
+        #expect(result.isEmpty || result.count <= 5)
     }
 
-    func testStringExtractionUnicode() {
+    @Test func stringExtractionUnicode() {
         let data = Data("Hello 🌍 World".utf8)
         let range = ByteRange(start: 0, end: UInt32(data.count))
 
         let result = range.string(in: data)
-        XCTAssertTrue(result.contains("🌍"))
+        #expect(result.contains("🌍"))
     }
 
     // MARK: - ByteRangeSequence
 
-    func testByteRangeSequenceEmpty() {
+    @Test func byteRangeSequenceEmpty() {
         let seq = ByteRangeSequence([])
         let data = Data("Hello".utf8)
 
-        XCTAssertEqual(seq.string(in: data), "")
+        #expect(seq.string(in: data) == "")
     }
 
-    func testByteRangeSequenceSingleRange() {
+    @Test func byteRangeSequenceSingleRange() {
         let seq = ByteRangeSequence([ByteRange(start: 0, end: 5)])
         let data = Data("Hello World".utf8)
 
-        XCTAssertEqual(seq.string(in: data), "Hello")
+        #expect(seq.string(in: data) == "Hello")
     }
 
-    func testByteRangeSequenceMultipleRanges() {
+    @Test func byteRangeSequenceMultipleRanges() {
         // "Hello World"
         //  01234 56789A
         let seq = ByteRangeSequence([
@@ -93,27 +94,27 @@ final class ByteRangeTests: XCTestCase {
         ])
         let data = Data("Hello World".utf8)
 
-        XCTAssertEqual(seq.string(in: data), "HelloWorld")
+        #expect(seq.string(in: data) == "HelloWorld")
     }
 
     // MARK: - TextContent
 
-    func testTextContentBytes() {
+    @Test func textContentBytes() {
         let data = Data("Hello".utf8)
         let content = TextContent.bytes(ByteRange(start: 0, end: 5))
 
-        XCTAssertEqual(content.string(in: data), "Hello")
+        #expect(content.string(in: data) == "Hello")
     }
 
-    func testTextContentString() {
+    @Test func textContentString() {
         let data = Data("Ignored".utf8)
         let content = TextContent.string("Direct string")
 
         // String variant ignores data
-        XCTAssertEqual(content.string(in: data), "Direct string")
+        #expect(content.string(in: data) == "Direct string")
     }
 
-    func testTextContentSequence() {
+    @Test func textContentSequence() {
         let data = Data("ABCDEFGHIJ".utf8)
         let seq = ByteRangeSequence([
             ByteRange(start: 0, end: 3),   // "ABC"
@@ -121,21 +122,21 @@ final class ByteRangeTests: XCTestCase {
         ])
         let content = TextContent.sequence(seq)
 
-        XCTAssertEqual(content.string(in: data), "ABCFGH")
+        #expect(content.string(in: data) == "ABCFGH")
     }
 
     // MARK: - Stable ID Tests
 
-    func testBlockIDUniqueness() {
+    @Test func blockIDUniqueness() {
         let id1 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
         let id2 = BlockID(kind: 1, start: 0, end: 10, ordinal: 2)
         let id3 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
 
-        XCTAssertNotEqual(id1, id2) // Different ordinal
-        XCTAssertEqual(id1, id3)    // Same values
+        #expect(id1 != id2) // Different ordinal
+        #expect(id1 == id3) // Same values
     }
 
-    func testBlockIDHashable() {
+    @Test func blockIDHashable() {
         let id1 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
         let id2 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
 
@@ -143,12 +144,12 @@ final class ByteRangeTests: XCTestCase {
         set.insert(id1)
         set.insert(id2)
 
-        XCTAssertEqual(set.count, 1) // Same ID should not duplicate
+        #expect(set.count == 1) // Same ID should not duplicate
     }
 
     // MARK: - Parser Integration
 
-    func testParsedBlocksHaveValidRanges() throws {
+    @Test func parsedBlocksHaveValidRanges() throws {
         let input = "# Heading\n\nParagraph with **bold** text."
         let doc = try MarkdownParser().parse(input)
 
@@ -157,12 +158,13 @@ final class ByteRangeTests: XCTestCase {
         }
     }
 
-    func testParsedSpansHaveValidRanges() throws {
+    @Test func parsedSpansHaveValidRanges() throws {
         let input = "Text with *emphasis* and `code` inside."
         let doc = try MarkdownParser().parse(input)
 
         guard case .paragraph(let p) = doc.blocks[0] else {
-            return XCTFail("Expected paragraph")
+            Issue.record("Expected paragraph")
+            return
         }
 
         for span in p.spans {
@@ -176,11 +178,11 @@ final class ByteRangeTests: XCTestCase {
         switch block {
         case .paragraph(let p):
             if !p.range.isEmpty {
-                XCTAssertLessThanOrEqual(p.range.end, sourceLength)
+                #expect(p.range.end <= sourceLength)
             }
         case .heading(let h):
             if !h.range.isEmpty {
-                XCTAssertLessThanOrEqual(h.range.end, sourceLength)
+                #expect(h.range.end <= sourceLength)
             }
         case .blockQuote(let q):
             for child in q.blocks {

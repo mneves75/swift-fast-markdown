@@ -1,10 +1,12 @@
 import XCTest
 @testable import SwiftFastMarkdown
 
-/// Tests for LRUCache timestamp-based eviction implementation.
+/// Tests for LRUCache doubly-linked list implementation.
 ///
-/// The cache achieves O(1) lookups and O(1) amortized insertions with
-/// O(n) worst-case eviction (acceptable since eviction is rare).
+/// The cache achieves true O(1) complexity for all operations:
+/// - O(1) lookup via dictionary
+/// - O(1) insert via head insertion
+/// - O(1) eviction via tail removal
 final class LRUCacheTests: XCTestCase {
 
     // MARK: - Basic Operations

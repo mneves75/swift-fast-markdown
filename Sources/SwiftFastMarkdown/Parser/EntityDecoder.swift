@@ -44,8 +44,17 @@ struct HTMLEntities: Sendable {
     }
 
     private static func loadEntities() -> [String: String] {
-        guard let url = Bundle.module.url(forResource: "HTMLEntities", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else {
+        guard let url = Bundle.module.url(forResource: "HTMLEntities", withExtension: "json") else {
+            #if DEBUG
+            assertionFailure("[SwiftFastMarkdown] HTMLEntities.json not found in bundle")
+            #endif
+            return [:]
+        }
+
+        guard let data = try? Data(contentsOf: url) else {
+            #if DEBUG
+            assertionFailure("[SwiftFastMarkdown] Failed to read HTMLEntities.json")
+            #endif
             return [:]
         }
 
@@ -53,6 +62,9 @@ struct HTMLEntities: Sendable {
         do {
             let json = try JSONSerialization.jsonObject(with: data, options: [])
             guard let dict = json as? [String: Any] else {
+                #if DEBUG
+                assertionFailure("[SwiftFastMarkdown] HTMLEntities.json has unexpected format")
+                #endif
                 return [:]
             }
 
@@ -67,6 +79,9 @@ struct HTMLEntities: Sendable {
             }
             decoded = output
         } catch {
+            #if DEBUG
+            assertionFailure("[SwiftFastMarkdown] Failed to parse HTMLEntities.json: \(error)")
+            #endif
             return [:]
         }
 

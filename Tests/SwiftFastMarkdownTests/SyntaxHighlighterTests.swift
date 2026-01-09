@@ -9,7 +9,7 @@ final class SyntaxHighlighterTests: XCTestCase {
     }
 
     func testHighlighterEngineHighlightsSwift() async throws {
-        guard let engine = HighlighterSwiftEngine() else {
+        guard let engine = HighlightrEngine() else {
             throw XCTSkip("Highlighter engine failed to initialize")
         }
         let result = await engine.highlight(code: "let value = 1", language: "swift")
@@ -17,7 +17,7 @@ final class SyntaxHighlighterTests: XCTestCase {
     }
 
     func testHighlighterCacheReturnsStableResults() async throws {
-        guard let engine = HighlighterSwiftEngine() else {
+        guard let engine = HighlightrEngine() else {
             throw XCTSkip("Highlighter engine failed to initialize")
         }
         let first = await engine.highlight(code: "let value = 1", language: "swift")

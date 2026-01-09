@@ -1,40 +1,40 @@
-import XCTest
+import Testing
 @testable import SwiftFastMarkdown
 
-final class IncrementalParserTests: XCTestCase {
+struct IncrementalParserTests {
 
     // MARK: - Basic Functionality
 
-    func testEmptyContent() {
+    @Test func emptyContent() {
         let parser = IncrementalMarkdownParser()
         let doc = parser.append("")
-        XCTAssertTrue(doc.blocks.isEmpty)
+        #expect(doc.blocks.isEmpty)
     }
 
-    func testSingleParagraph() {
+    @Test func singleParagraph() {
         let parser = IncrementalMarkdownParser()
-        let doc = parser.append("Hello world")
+        _ = parser.append("Hello world")
         let finalDoc = parser.finalize()
 
-        XCTAssertEqual(finalDoc.blocks.count, 1)
+        #expect(finalDoc.blocks.count == 1)
         if case .paragraph = finalDoc.blocks[0] {
             // Success
         } else {
-            XCTFail("Expected paragraph block")
+            Issue.record("Expected paragraph block")
         }
     }
 
-    func testMultipleParagraphs() {
+    @Test func multipleParagraphs() {
         let parser = IncrementalMarkdownParser()
         _ = parser.append("First paragraph.\n\nSecond paragraph.")
         let doc = parser.finalize()
 
-        XCTAssertEqual(doc.blocks.count, 2)
+        #expect(doc.blocks.count == 2)
     }
 
     // MARK: - Streaming Correctness
 
-    func testIncrementalEqualsFullParse() throws {
+    @Test func incrementalEqualsFullParse() throws {
         let fullContent = """
         # Heading
 
@@ -77,17 +77,17 @@ final class IncrementalParserTests: XCTestCase {
         let incrementalDoc = parser.finalize()
 
         // Verify same number of blocks
-        XCTAssertEqual(fullDoc.blocks.count, incrementalDoc.blocks.count,
-                       "Block count mismatch: full=\(fullDoc.blocks.count), incremental=\(incrementalDoc.blocks.count)")
+        #expect(fullDoc.blocks.count == incrementalDoc.blocks.count,
+                "Block count mismatch: full=\(fullDoc.blocks.count), incremental=\(incrementalDoc.blocks.count)")
 
         // Verify block types match
         for (index, (fullBlock, incBlock)) in zip(fullDoc.blocks, incrementalDoc.blocks).enumerated() {
-            XCTAssertTrue(blocksHaveSameType(fullBlock, incBlock),
-                          "Block type mismatch at index \(index)")
+            #expect(blocksHaveSameType(fullBlock, incBlock),
+                    "Block type mismatch at index \(index)")
         }
     }
 
-    func testChunkedHeading() {
+    @Test func chunkedHeading() {
         let parser = IncrementalMarkdownParser()
 
         // Send heading character by character
@@ -101,15 +101,15 @@ final class IncrementalParserTests: XCTestCase {
         _ = parser.append("\n")
         let doc = parser.finalize()
 
-        XCTAssertEqual(doc.blocks.count, 1)
+        #expect(doc.blocks.count == 1)
         if case .heading(let h) = doc.blocks[0] {
-            XCTAssertEqual(h.level, 1)
+            #expect(h.level == 1)
         } else {
-            XCTFail("Expected heading")
+            Issue.record("Expected heading")
         }
     }
 
-    func testFencedCodeBlockStreaming() {
+    @Test func fencedCodeBlockStreaming() {
         let parser = IncrementalMarkdownParser()
 
         _ = parser.append("```swift\n")
@@ -122,62 +122,62 @@ final class IncrementalParserTests: XCTestCase {
         _ = parser.append("```\n")
         doc = parser.finalize()
 
-        XCTAssertEqual(doc.blocks.count, 1)
+        #expect(doc.blocks.count == 1)
         if case .codeBlock(let code) = doc.blocks[0] {
             let content = code.content.string(in: doc.sourceData)
-            XCTAssertTrue(content.contains("let x = 1"))
-            XCTAssertTrue(content.contains("let y = 2"))
+            #expect(content.contains("let x = 1"))
+            #expect(content.contains("let y = 2"))
         } else {
-            XCTFail("Expected code block")
+            Issue.record("Expected code block")
         }
     }
 
     // MARK: - Reset Behavior
 
-    func testResetClearsState() {
+    @Test func resetClearsState() {
         let parser = IncrementalMarkdownParser()
         _ = parser.append("Some content\n\nMore content")
         _ = parser.finalize()
 
-        XCTAssertGreaterThan(parser.stableBlockCount, 0)
+        #expect(parser.stableBlockCount > 0)
 
         parser.reset()
 
-        XCTAssertEqual(parser.stableBlockCount, 0)
-        XCTAssertTrue(parser.pendingContent.isEmpty)
+        #expect(parser.stableBlockCount == 0)
+        #expect(parser.pendingContent.isEmpty)
     }
 
     // MARK: - Edge Cases
 
-    func testEmptyLines() {
+    @Test func emptyLines() {
         let parser = IncrementalMarkdownParser()
         _ = parser.append("\n\n\n")
         let doc = parser.finalize()
 
         // Empty lines should produce no blocks
-        XCTAssertTrue(doc.blocks.isEmpty)
+        #expect(doc.blocks.isEmpty)
     }
 
-    func testOnlyWhitespace() {
+    @Test func onlyWhitespace() {
         let parser = IncrementalMarkdownParser()
         _ = parser.append("   \t  \n  \t\t  ")
         let doc = parser.finalize()
 
-        XCTAssertTrue(doc.blocks.isEmpty)
+        #expect(doc.blocks.isEmpty)
     }
 
-    func testNestedBlockQuote() throws {
+    @Test func nestedBlockQuote() throws {
         let content = "> Level 1\n> > Level 2\n> > > Level 3"
         let parser = IncrementalMarkdownParser()
         _ = parser.append(content)
         let doc = parser.finalize()
 
         // Should have at least one block quote
-        XCTAssertEqual(doc.blocks.count, 1)
+        #expect(doc.blocks.count == 1)
         if case .blockQuote = doc.blocks[0] {
             // Success
         } else {
-            XCTFail("Expected block quote")
+            Issue.record("Expected block quote")
         }
     }
 
