@@ -25,7 +25,11 @@ let package = Package(
         .target(
             name: "CMD4C",
             path: "Sources/CMD4C",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(["-O3"]),
+                .unsafeFlags(["-ffast-math"])
+            ]
         ),
         .target(
             name: "SwiftFastMarkdown",

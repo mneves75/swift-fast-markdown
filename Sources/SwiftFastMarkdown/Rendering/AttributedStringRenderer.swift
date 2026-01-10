@@ -30,7 +30,7 @@ public struct AttributedStringRenderer {
         fontOverride: Font? = nil
     ) -> AttributedString {
         let font = fontOverride ?? style.baseFont
-        return renderInline(spans, source: source, style: style, fontOverride: font)
+        return renderInlineSpans(spans, source: source, style: style, fontOverride: font)
     }
 
     private func renderBlock(_ block: MarkdownBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
@@ -137,7 +137,7 @@ public struct AttributedStringRenderer {
     }
 
     @inline(__always)
-    private func renderInline(
+    private func renderInlineSpans(
         _ spans: [MarkdownSpan],
         source: Data,
         style: MarkdownStyle,
