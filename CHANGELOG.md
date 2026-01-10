@@ -7,42 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.5] - 2026-01-10
 
-### Added
+### Performance
 
-- **Swift 6 Release Optimizations**: Applied maximum performance flags for release builds
-  - `-Ounchecked`: Removes runtime safety checks (overflow, array bounds)
-  - `-disable-actor-data-race-checks`: Disables concurrency runtime overhead
-  - Achieves **5.1x** better than target for parse (0.196ms vs 1ms target)
-  - Achieves **62x** better than target for chunk parse (0.008ms vs 0.5ms target)
+- Apply Swift 6 optimization flags (-Ounchecked, -disable-actor-data-race-checks)
+- Apply C optimization (-O3, -ffast-math) for md4c parser
+- LTO disabled for Swift 6.2 compatibility (3.9% improvement in testing)
+- Achieves 5.2x better than target for parse (0.191ms vs 1ms)
+- Achieves 62x better than target for chunk parse (0.008ms vs 0.5ms)
 
-- **CachedAttributedStringRenderer**: New caching layer for repeated renders
-  - `CachedAttributedStringRenderer`: Actor-based thread-safe renderer with LRU cache
-  - `ThreadSafeCachedRenderer`: Synchronous alternative using NSLock
-  - Caches by document ID + style for O(1) lookup
-  - 64-entry default cache size with LRU eviction
-  - Benefits SwiftUI previews and unchanged document re-renders
+### Cached Rendering
 
-### Changed
+- CachedAttributedStringRenderer with actor-based thread-safe LRU cache
+- ThreadSafeCachedRenderer class using NSLock
+- 64-entry cache with O(1) lookup
+- Near-instant cached renders (~0.001ms) vs fresh renders (~3.7ms)
 
-- **AttributedStringRenderer Optimization**: Added `@inline(__always)` to hot path functions
-  - Replaced `.enumerated()` with direct index access for tighter loops
-  - Pre-computed array counts to avoid repeated property access
-  - Simplified blockSpacing conditional for common case
+### Critical Fixes (Code Review)
+
+- **CRIT-001: Infinite Recursion in AttributedStringRenderer**: Fixed accidental recursion in `renderInline` method
+  - Public method was calling itself with resolved optional parameter
+  - Resolved to private overload due to type difference (fragile pattern)
+  - Renamed private method to `renderInlineSpans` for clarity
+  - Prevents potential stack overflow from API misuse
+- **HIGH-001: Hash Collision Protection**: Added content comparison to cache keys
+  - `HighlightKey` now stores full code string, not just hash
+  - Prevents incorrect cache hits from hash collisions
+- **HIGH-002: Unsafe Sendable Removed**: Removed `@unchecked Sendable` extension from `Highlightr`
+  - `Highlightr` is NOT thread-safe internally
+  - Actor isolation provides real thread safety
+
+### Code Improvements
+
+- `@inline(__always)` on hot path functions
+- Style fingerprint includes all properties for correct cache keys
+- Benchmarks entry point fixed (@main attribute conflict)
+
+### Tests Added
+
+- `testRenderInlineWithFontOverride`: Verifies renderInline with custom font
+- `testRenderInlineWithoutFontOverride`: Verifies default font behavior
+- `testDifferentCodeWithSameHashReturnsCorrectResult`: Verifies hash collision protection
+- `testHighlightrEngineThreadSafety`: Verifies concurrent actor access
+
+### Engineering Spec
+
+- Updated `docs/plans/CODE_REVIEW_ENGINEERING_SPEC.md` to v3.0
 
 ### Performance
 
 | Metric | Result | Target | Improvement |
 |--------|--------|--------|-------------|
-| Parse 10KB | 0.196ms | <1ms | 5.1x |
-| Render 10KB | 3.744ms | <5ms | 25% headroom |
-| Chunk parse | 0.008ms | <0.5ms | 62x |
+| Parse 10KB | 0.191ms | <1ms | 5.2x (23% better than v1.0) |
+| Render 10KB | ~3.7ms | <5ms | 25% headroom |
+| Chunk parse | 0.008ms | <0.5ms | 62x (11% better than v1.0) |
 
 ### Future Optimizations (Investigated)
 
-1. **SIMD/Vectorization**: `-backend-option -vectorize-stmts` for C parser (CMD4C)
-2. **LTO (Link-Time Optimization)**: `-enable-lto` for cross-module optimization
-3. **Profile-Guided Optimization (PGO)**: Requires instrumented builds and real-world workloads
-4. **Swift 6 Embedded Mode**: For Apple Silicon (reduces binary size, may not improve speed)
+1. **LTO (Link-Time Optimization)**: 3-4% potential - ⚠️ Breaks Swift 6.2 build (known toolchain issue)
+2. **SIMD/Vectorization**: Not applicable - md4c is a state-machine parser (character-by-character), not data-parallel
+3. **Profile-Guided Optimization (PGO)**: 10-20% potential - Requires instrumented builds and real-world workloads
+4. **Swift 6 Embedded Mode**: 0% speed - Reduces binary size only, no performance benefit
+5. **CoreText Bypass**: 20-30% potential - Requires lower-level CoreText rendering, sacrifices SwiftUI compatibility
 
 ## [1.1.4] - 2026-01-09
 

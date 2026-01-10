@@ -166,9 +166,7 @@ enum TestDocuments {
 
 // MARK: - Benchmarks
 
-@main
-struct SwiftFastMarkdownBenchmarks {
-    static func main() {
+func runBenchmarks() {
         print("=" * 60)
         print("SwiftFastMarkdown Benchmark Suite")
         print("=" * 60)
@@ -290,7 +288,7 @@ struct SwiftFastMarkdownBenchmarks {
         printSummary(parseMedium, renderMedium, chunkTimes.isEmpty ? nil : BenchmarkResult(name: "chunk", samples: Array(chunkTimes.suffix(chunks.count))))
     }
 
-    static func checkTarget(_ name: String, _ median: Double, target: Double, p95: Double, p95Target: Double) {
+    func checkTarget(_ name: String, _ median: Double, target: Double, p95: Double, p95Target: Double) {
         let medianPass = median <= target
         let p95Pass = p95 <= p95Target
         let medianSymbol = medianPass ? "PASS" : "FAIL"
@@ -299,7 +297,7 @@ struct SwiftFastMarkdownBenchmarks {
         print("    Target check: p95 \(String(format: "%.3f", p95))ms <= \(p95Target)ms [\(p95Symbol)]")
     }
 
-    static func countBlocks(_ blocks: [MarkdownBlock]) -> Int {
+    func countBlocks(_ blocks: [MarkdownBlock]) -> Int {
         var count = 0
         for block in blocks {
             count += 1
@@ -317,7 +315,7 @@ struct SwiftFastMarkdownBenchmarks {
         return count
     }
 
-    static func printSummary(_ parse: BenchmarkResult, _ render: BenchmarkResult, _ chunk: BenchmarkResult?) {
+    func printSummary(_ parse: BenchmarkResult, _ render: BenchmarkResult, _ chunk: BenchmarkResult?) {
         print()
         print("  Parse 10KB:   median=\(String(format: "%.3f", parse.median))ms (target <1ms)    \(parse.median < 1.0 ? "PASS" : "FAIL")")
         print("  Render 10KB:  median=\(String(format: "%.3f", render.median))ms (target <5ms)    \(render.median < 5.0 ? "PASS" : "FAIL")")
@@ -325,7 +323,6 @@ struct SwiftFastMarkdownBenchmarks {
             print("  Chunk parse:  median=\(String(format: "%.3f", chunk.median))ms (target <0.5ms)  \(chunk.median < 0.5 ? "PASS" : "FAIL")")
         }
         print()
-    }
 }
 
 // Helper for string repetition
@@ -334,3 +331,7 @@ extension String {
         String(repeating: lhs, count: rhs)
     }
 }
+
+// MARK: - Entry Point
+
+runBenchmarks()

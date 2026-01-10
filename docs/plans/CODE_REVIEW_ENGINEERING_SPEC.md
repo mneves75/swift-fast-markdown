@@ -1,7 +1,7 @@
 # SwiftFastMarkdown Code Review Engineering Specification
 
-**Version**: 2.0
-**Date**: January 9, 2026
+**Version**: 3.0
+**Date**: January 10, 2026
 **Author**: Engineering Team
 **Reviewer**: John Carmack
 
@@ -9,7 +9,20 @@
 
 ## Executive Summary
 
-This document contains the findings from a comprehensive Carmack-level code review of SwiftFastMarkdown v1.1.1. The review examined all source files for bugs, anti-patterns, safety issues, and opportunities to adopt Swift 6.2+ best practices (WWDC 2025).
+This document contains findings from a comprehensive Carmack-level code review of SwiftFastMarkdown v1.1.5. The review examined all source files against SWIFT-GUIDELINES.md, IOS-GUIDELINES.md, and DEV-GUIDELINES.md.
+
+### Summary of Findings
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 1 | Must Fix |
+| HIGH | 3 | Must Fix |
+| MEDIUM | 4 | Should Fix |
+| LOW | 2 | Nice to Have |
+
+### Critical Finding: Infinite Recursion
+
+**CRIT-001**: `AttributedStringRenderer.renderInline` contains accidental recursion due to method overloading by optionality. While it works due to overload resolution to private method, this is fragile and violates Swift API Design Guidelines.
 
 ---
 
@@ -285,6 +298,215 @@ Swift 6.2 introduced `Span` for safe buffer operations. Not applicable here sinc
 
 ---
 
-**Document Status**: Implementation Complete (v1.1.3)
-**Last Updated**: January 9, 2026
+**Document Status**: In Progress (v1.1.5 Review)
+**Last Updated**: January 10, 2026
 **Verified By**: Automated test suite (106 tests)
+
+---
+
+## Part 8: v1.1.5 Code Review Findings (January 10, 2026)
+
+### 8.1 Critical Issues
+
+#### CRIT-001: Infinite Recursion in AttributedStringRenderer.renderInline
+
+**File**: `Sources/SwiftFastMarkdown/Rendering/AttributedStringRenderer.swift:26-34`
+
+**Severity**: CRITICAL - Stack overflow risk
+
+**Description**:
+```swift
+public func renderInline(
+    _ spans: [MarkdownSpan],
+    source: Data,
+    style: MarkdownStyle = .default,
+    fontOverride: Font? = nil  // Optional parameter
+) -> AttributedString {
+    let font = fontOverride ?? style.baseFont
+    return renderInline(spans, source: source, style: style, fontOverride: font)
+    // Recursive call resolves to PRIVATE overload due to parameter type difference
+}
+```
+
+**Why It Works (By Accident)**:
+- The call resolves to the PRIVATE `renderInline(_:source:style:fontOverride:)` because `font` is non-optional `Font`
+- Private method has different signature (non-optional `fontOverride`)
+- This is fragile and confusing
+
+**Fix**:
+```swift
+// Rename private method to avoid confusion
+public func renderInline(...) -> AttributedString {
+    let font = fontOverride ?? style.baseFont
+    return renderInlineSpans(spans, source: source, style: style, fontOverride: font)
+}
+
+@inline(__always)
+private func renderInlineSpans(...) -> AttributedString { ... }
+```
+
+---
+
+### 8.2 High Severity Issues
+
+#### HIGH-001: Hash Collision in Cache Keys
+
+**Files**:
+- `Sources/SwiftFastMarkdown/Rendering/CachedAttributedStringRenderer.swift`
+- `Sources/SwiftFastMarkdown/Highlighting/HighlightrEngine.swift:65`
+
+**Issue**: Uses `code.hashValue` for cache key without content verification
+
+**Fix**: Use full content comparison alongside hash
+
+#### HIGH-002: Unsafe Sendable Conformance
+
+**File**: `Sources/SwiftFastMarkdown/Highlighting/HighlightrEngine.swift:16`
+
+**Issue**:
+```swift
+extension Highlightr: @retroactive @unchecked Sendable {}
+```
+
+**Impact**: False sense of thread safety - Highlightr is NOT thread-safe internally
+
+**Fix**: Remove the extension; actor isolation provides real thread safety
+
+#### HIGH-003: C Interop Pointer Lifetime
+
+**File**: `Sources/SwiftFastMarkdown/Parser/MD4CParser.swift:23-40`
+
+**Issue**: `ParserContext.basePointer` stores pointer beyond `withUnsafeBytes` closure
+
+**Current Mitigation**: ParserContext is used only synchronously within `md_parse`
+
+**Recommendation**: Consider redesign to avoid storing pointers
+
+---
+
+### 8.3 Medium Severity Issues
+
+#### MED-001: Confusing Method Overloading
+
+**File**: `Sources/SwiftFastMarkdown/Rendering/AttributedStringRenderer.swift`
+
+Two methods named `renderInline` with optional vs non-optional parameter
+
+#### MED-002: Unchecked Optional in C Callbacks
+
+**File**: `Sources/SwiftFastMarkdown/Parser/MD4CParser.swift:209-210`
+
+Silent handling of nil pointers via optional chaining
+
+#### MED-003: Non-Deterministic Font Cache Keys
+
+**File**: `Sources/SwiftFastMarkdown/Rendering/CachedAttributedStringRenderer.swift:109`
+
+Font description may include runtime-specific information
+
+#### MED-004: EntityDecoder Silent Failure
+
+**File**: `Sources/SwiftFastMarkdown/Parser/EntityDecoder.swift`
+
+Returns empty dictionary on failure without user notification
+
+---
+
+### 8.4 Low Severity Issues
+
+#### LOW-001: Debug Print in Production Code
+
+**File**: `Sources/SwiftFastMarkdown/Highlighting/HighlightrEngine.swift:95-99`
+
+Consider using `os.Logger` per LOG-GUIDELINES.md
+
+#### LOW-002: Privacy Manifest ✅ VERIFIED
+
+`PrivacyInfo.xcprivacy` exists and is properly configured
+
+---
+
+### 8.5 Test Coverage Assessment
+
+| Area | Status | Tests |
+|------|--------|-------|
+| ByteRange | ✅ Good | Basic operations |
+| IncrementalParser | ✅ Good | Core functionality |
+| LRUCache | ✅ Good | Cache operations |
+| AttributedStringRenderer | ⚠️ Minimal | Basic rendering only |
+| HighlightrEngine | ❌ Missing | No async tests |
+| MD4CParser | ⚠️ Minimal | No edge case tests |
+
+**Missing Tests**:
+1. Infinite recursion test for `renderInline`
+2. Hash collision test for `HighlightKey`
+3. Entity decoding failure test
+4. Large document parsing test
+5. Concurrent access test for non-actor caches
+
+---
+
+## Part 9: Implementation Plan v1.1.5
+
+### Phase 1: Critical Fixes (Immediate)
+
+| Issue | File | Change |
+|-------|------|--------|
+| CRIT-001 | AttributedStringRenderer.swift | Rename private `renderInline` to `renderInlineSpans` |
+| HIGH-002 | HighlightrEngine.swift | Remove unsafe `Sendable` extension |
+
+### Phase 2: High Priority (This Sprint)
+
+| Issue | File | Change |
+|-------|------|--------|
+| HIGH-001 | CachedAttributedStringRenderer.swift | Add content comparison to cache keys |
+| HIGH-001 | HighlightrEngine.swift | Add content comparison to HighlightKey |
+| HIGH-03 | MD4CParser.swift | Document pointer lifetime rationale |
+
+### Phase 3: Medium Priority (Next Sprint)
+
+| Issue | File | Change |
+|-------|------|--------|
+| MED-001 | AttributedStringRenderer.swift | Rename overloaded methods |
+| MED-002 | MD4CParser.swift | Add explicit guard statements |
+| MED-003 | CachedAttributedStringRenderer.swift | Use stable font representation |
+| MED-004 | EntityDecoder.swift | Add error handling |
+
+### Phase 4: Test Coverage
+
+1. Add test for renderInline with fontOverride
+2. Add test for hash collision edge case
+3. Add performance benchmark tests
+
+---
+
+## Part 10: Compliance Summary v1.1.5
+
+| Guideline | Status | Notes |
+|-----------|--------|-------|
+| Swift 6 Strict Concurrency | ✅ PASS | Actors used correctly |
+| Thread Safety | ⚠️ PARTIAL | Actor isolation good, but Sendable extension problematic |
+| Type Safety | ✅ PASS | No `any` types, good use of `Sendable` |
+| Error Handling | ⚠️ PARTIAL | Some silent failures in EntityDecoder |
+| Memory Safety | ⚠️ PARTIAL | C interop needs review |
+| Testing | ⚠️ PARTIAL | Missing critical path tests |
+| Privacy Compliance | ✅ PASS | PrivacyInfo.xcprivacy present |
+| Documentation | ⚠️ PARTIAL | Missing API comments |
+
+---
+
+## Part 11: Verification Checklist
+
+### Pre-Fix Verification
+- [x] All source files reviewed
+- [x] Issues cataloged and prioritized
+- [x] Engineering spec updated
+
+### Post-Fix Verification (v1.1.6)
+- [ ] CRIT-001: Infinite recursion fixed
+- [ ] HIGH-001: Hash collision protection added
+- [ ] HIGH-002: Unsafe Sendable removed
+- [ ] HIGH-03: Pointer lifetime documented
+- [ ] All 106 tests pass
+- [ ] Build succeeds with no warnings
+- [ ] Performance benchmarks unchanged

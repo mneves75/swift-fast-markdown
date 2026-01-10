@@ -38,13 +38,10 @@ public actor CachedAttributedStringRenderer {
     ///   - style: The style to apply during rendering.
     /// - Returns: The rendered AttributedString.
     public func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
-        // Use document.id as primary key, combined with style identifier
-        // For default style, we cache by document.id
-        // For custom styles, we include a style hash to differentiate
         let key = CacheKey(document: document, style: style)
 
         if let cached = cache[key.id] {
-            // Check if style matches (for default style, always match)
+            // Check if style matches
             if cached.styleIdentifier == key.styleIdentifier {
                 // Move to front (most recently used)
                 if let index = lruOrder.firstIndex(of: key.id) {
@@ -104,23 +101,25 @@ private struct CacheKey {
         self.styleIdentifier = Self.computeStyleIdentifier(style)
     }
 
-    /// Computes a stable identifier for the style.
-    /// Uses property comparison rather than reflection for stability.
+    /// Computes a stable identifier for the style using all relevant properties.
+    /// This ensures different styles produce different cache keys.
     private static func computeStyleIdentifier(_ style: MarkdownStyle) -> String {
-        // For the common case of default style, return a fixed string
-        if isDefaultStyle(style) {
-            return "default"
-        }
-        // For custom styles, use a combination of the known properties
-        return "\(style.blockSpacing)|\(style.listIndent)"
-    }
+        // Use description which provides stable string representation
+        // for all Font, Color, and Int properties
+        let fontDescriptions = style.headingFonts.map { "\($0)" }.joined(separator: ",")
 
-    private static func isDefaultStyle(_ style: MarkdownStyle) -> Bool {
-        // Check if this is the default style by comparing known values
-        style.blockSpacing == 2 &&
-        style.listIndent == 2 &&
-        style.baseFont == .system(.body) &&
-        style.codeFont == .system(.body, design: .monospaced)
+        return [
+            "baseFont:\(style.baseFont)",
+            "codeFont:\(style.codeFont)",
+            "headingFonts:[\(fontDescriptions)]",
+            "linkColor:\(style.linkColor)",
+            "textColor:\(style.textColor)",
+            "codeTextColor:\(style.codeTextColor)",
+            "codeBackgroundColor:\(style.codeBackgroundColor)",
+            "quoteStripeColor:\(style.quoteStripeColor)",
+            "blockSpacing:\(style.blockSpacing)",
+            "listIndent:\(style.listIndent)"
+        ].joined(separator: "|")
     }
 }
 
@@ -130,8 +129,8 @@ private struct CacheKey {
 ///
 /// Uses `NSLock` for thread safety instead of Swift concurrency.
 /// Best used in benchmarks or non-async contexts.
-public struct ThreadSafeCachedRenderer {
-    private let renderer = AttributedStringRenderer()
+public final class ThreadSafeCachedRenderer {
+    private let renderer: AttributedStringRenderer
     private var cache: [UUID: CachedEntry]
     private var lruOrder: [UUID]
     private let lock = NSLock()
@@ -141,6 +140,7 @@ public struct ThreadSafeCachedRenderer {
     ///
     /// - Parameter maxCacheSize: Maximum number of entries to cache. Defaults to 32.
     public init(maxCacheSize: Int = 32) {
+        self.renderer = AttributedStringRenderer()
         self.maxCacheSize = maxCacheSize
         self.cache = [:]
         self.lruOrder = []
@@ -153,7 +153,7 @@ public struct ThreadSafeCachedRenderer {
     ///   - document: The markdown document to render.
     ///   - style: The style to apply during rendering.
     /// - Returns: The rendered AttributedString.
-    public mutating func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
+    public func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
         let key = CacheKey(document: document, style: style)
 
         lock.lock()
@@ -187,7 +187,7 @@ public struct ThreadSafeCachedRenderer {
     }
 
     /// Clears the cache.
-    public mutating func clearCache() {
+    public func clearCache() {
         lock.lock()
         defer { lock.unlock() }
         cache.removeAll()

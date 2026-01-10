@@ -26,4 +26,37 @@ final class AttributedStringRendererTests: XCTestCase {
         }
         XCTAssertFalse(codeRuns.isEmpty)
     }
+
+    // MARK: - renderInline Tests
+
+    func testRenderInlineWithFontOverride() throws {
+        let renderer = AttributedStringRenderer()
+        let document = try MarkdownParser().parse("**bold** and *italic*")
+        guard case .paragraph(let para) = document.blocks.first else {
+            XCTFail("Expected paragraph block")
+            return
+        }
+
+        // Test that renderInline works with fontOverride (CRIT-001 fix verification)
+        let customFont = Font.system(size: 20).bold()
+        let rendered = renderer.renderInline(para.spans, source: document.sourceData, style: .default, fontOverride: customFont)
+
+        // Verify rendering completed without infinite recursion
+        XCTAssertFalse(rendered.characters.isEmpty)
+    }
+
+    func testRenderInlineWithoutFontOverride() throws {
+        let renderer = AttributedStringRenderer()
+        let document = try MarkdownParser().parse("Regular text")
+        guard case .paragraph(let para) = document.blocks.first else {
+            XCTFail("Expected paragraph block")
+            return
+        }
+
+        // Test default font behavior
+        let rendered = renderer.renderInline(para.spans, source: document.sourceData, style: .default)
+
+        XCTAssertFalse(rendered.characters.isEmpty)
+        XCTAssertEqual(String(rendered.characters), "Regular text")
+    }
 }

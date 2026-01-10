@@ -10,10 +10,9 @@ import AppKit
 private typealias PlatformFont = NSFont
 #endif
 
-// MARK: - Sendable Conformance
-// Highlightr is not Sendable by default, but we isolate all access within the actor.
-// This extension makes the compiler happy while the actor provides actual thread safety.
-extension Highlightr: @retroactive @unchecked Sendable {}
+// Note: Highlightr is NOT thread-safe, but we protect all access via actor isolation.
+// We intentionally do NOT extend Highlightr to be Sendable - the actor provides
+// the thread safety, not the type itself.
 
 public actor HighlightrEngine: SyntaxHighlighting {
     public struct Configuration: Sendable {
@@ -62,7 +61,7 @@ public actor HighlightrEngine: SyntaxHighlighting {
     }
 
     public func highlight(code: String, language: String?) async -> AttributedString {
-        let key = HighlightKey(theme: configuration.theme, language: language, codeHash: code.hashValue)
+        let key = HighlightKey(theme: configuration.theme, language: language, code: code)
         if let cached = cache.value(for: key) {
             return cached
         }
@@ -113,5 +112,17 @@ public actor HighlightrEngine: SyntaxHighlighting {
 private struct HighlightKey: Hashable {
     let theme: String
     let language: String?
-    let codeHash: Int
+    let code: String  // Full code content for collision-free comparison
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(theme)
+        hasher.combine(language)
+        hasher.combine(code.hashValue)  // Use hash for performance
+    }
+
+    static func == (lhs: HighlightKey, rhs: HighlightKey) -> Bool {
+        lhs.theme == rhs.theme &&
+        lhs.language == rhs.language &&
+        lhs.code == rhs.code  // Full comparison to prevent hash collisions
+    }
 }
