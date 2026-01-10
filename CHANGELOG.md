@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Achieves **5.1x** better than target for parse (0.196ms vs 1ms target)
   - Achieves **62x** better than target for chunk parse (0.008ms vs 0.5ms target)
 
+- **CachedAttributedStringRenderer**: New caching layer for repeated renders
+  - `CachedAttributedStringRenderer`: Actor-based thread-safe renderer with LRU cache
+  - `ThreadSafeCachedRenderer`: Synchronous alternative using NSLock
+  - Caches by document ID + style for O(1) lookup
+  - 64-entry default cache size with LRU eviction
+  - Benefits SwiftUI previews and unchanged document re-renders
+
 ### Changed
 
 - **AttributedStringRenderer Optimization**: Added `@inline(__always)` to hot path functions
@@ -36,7 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 2. **LTO (Link-Time Optimization)**: `-enable-lto` for cross-module optimization
 3. **Profile-Guided Optimization (PGO)**: Requires instrumented builds and real-world workloads
 4. **Swift 6 Embedded Mode**: For Apple Silicon (reduces binary size, may not improve speed)
-5. **AttributedString Rendering**: Fundamental bottleneck is Apple's framework; improvements require caching or CoreText bypass
 
 ## [1.1.4] - 2026-01-09
 
