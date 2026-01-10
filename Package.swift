@@ -36,6 +36,10 @@ let package = Package(
             path: "Sources/SwiftFastMarkdown",
             resources: [
                 .process("Resources")
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-Ounchecked"]),
+                .unsafeFlags(["-disable-actor-data-race-checks"])
             ]
         ),
         .executableTarget(

@@ -6,11 +6,18 @@ public struct AttributedStringRenderer {
 
     public func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
         var result = AttributedString()
-        for (index, block) in document.blocks.enumerated() {
-            let rendered = renderBlock(block, source: document.sourceData, style: style, indentLevel: 0)
-            result.append(rendered)
-            if index < document.blocks.count - 1 {
-                result.append(AttributedString(String(repeating: "\n", count: style.blockSpacing)))
+        let blocks = document.blocks
+        let blockCount = blocks.count
+        let blockSpacing = style.blockSpacing
+
+        for index in blocks.indices {
+            result.append(renderBlock(blocks[index], source: document.sourceData, style: style, indentLevel: 0))
+            if index < blockCount - 1 {
+                if blockSpacing > 1 {
+                    result.append(AttributedString(String(repeating: "\n", count: blockSpacing)))
+                } else {
+                    result.append(AttributedString("\n"))
+                }
             }
         }
         return result
@@ -48,6 +55,7 @@ public struct AttributedStringRenderer {
         }
     }
 
+    @inline(__always)
     private func renderSpans(
         _ spans: [MarkdownSpan],
         source: Data,
@@ -66,6 +74,7 @@ public struct AttributedStringRenderer {
         return result
     }
 
+    @inline(__always)
     private func renderSpan(
         _ span: MarkdownSpan,
         source: Data,
@@ -127,6 +136,7 @@ public struct AttributedStringRenderer {
         }
     }
 
+    @inline(__always)
     private func renderInline(
         _ spans: [MarkdownSpan],
         source: Data,
@@ -140,93 +150,113 @@ public struct AttributedStringRenderer {
         return result
     }
 
+    @inline(__always)
     private func renderCodeBlock(_ codeBlock: CodeBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
         var content = AttributedString(codeBlock.content.string(in: source))
         content = applyBaseAttributes(content, font: style.codeFont, color: style.codeTextColor)
         content.backgroundColor = style.codeBackgroundColor
-        let prefix = String(repeating: " ", count: indentLevel)
-        return AttributedString(prefix) + content
+        if indentLevel > 0 {
+            let prefix = String(repeating: " ", count: indentLevel)
+            return AttributedString(prefix) + content
+        }
+        return content
     }
 
+    @inline(__always)
     private func renderBlockQuote(_ quote: BlockQuoteBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
         let prefix = String(repeating: " ", count: indentLevel) + "› "
         var result = AttributedString()
-        for (index, block) in quote.blocks.enumerated() {
-            let rendered = renderBlock(block, source: source, style: style, indentLevel: indentLevel + style.listIndent)
+        let blocks = quote.blocks
+        let count = blocks.count
+        for index in blocks.indices {
             result.append(AttributedString(prefix))
-            result.append(rendered)
-            if index < quote.blocks.count - 1 {
+            result.append(renderBlock(blocks[index], source: source, style: style, indentLevel: indentLevel + style.listIndent))
+            if index < count - 1 {
                 result.append(AttributedString("\n"))
             }
         }
         return result
     }
 
+    @inline(__always)
     private func renderList(_ list: ListBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
         var result = AttributedString()
-        for (index, item) in list.items.enumerated() {
+        let items = list.items
+        let count = items.count
+        let ordered = list.ordered
+        let start = list.start
+
+        for index in items.indices {
             let marker: String
-            if list.ordered {
-                marker = "\(list.start + index). "
+            if ordered {
+                marker = "\(start + index). "
             } else {
                 marker = "• "
             }
             var renderedItem = AttributedString(marker)
-            for (blockIndex, block) in item.blocks.enumerated() {
-                let rendered = renderBlock(block, source: source, style: style, indentLevel: indentLevel + style.listIndent)
-                renderedItem.append(rendered)
-                if blockIndex < item.blocks.count - 1 {
+            let blocks = items[index].blocks
+            let blockCount = blocks.count
+            for blockIndex in blocks.indices {
+                renderedItem.append(renderBlock(blocks[blockIndex], source: source, style: style, indentLevel: indentLevel + style.listIndent))
+                if blockIndex < blockCount - 1 {
                     renderedItem.append(AttributedString("\n"))
                 }
             }
             let prefix = String(repeating: " ", count: indentLevel)
             result.append(AttributedString(prefix) + renderedItem)
-            if index < list.items.count - 1 {
+            if index < count - 1 {
                 result.append(AttributedString("\n"))
             }
         }
         return result
     }
 
+    @inline(__always)
     private func renderTable(_ table: TableBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
         let rows = table.headerRows + table.bodyRows
         guard !rows.isEmpty else { return AttributedString() }
         let prefix = String(repeating: " ", count: indentLevel)
         var result = AttributedString()
-        for (index, row) in rows.enumerated() {
-            let cellText = row.cells.map { cell in
-                renderSpans(cell.spans, source: source, style: style, fontOverride: style.baseFont, indentLevel: 0)
-            }
+        let rowCount = rows.count
+        for index in rows.indices {
+            let row = rows[index]
+            let cells = row.cells
+            let cellCount = cells.count
             var rowString = AttributedString(prefix)
-            for (cellIndex, cellValue) in cellText.enumerated() {
-                rowString.append(cellValue)
-                if cellIndex < cellText.count - 1 {
+            for cellIndex in cells.indices {
+                rowString.append(renderSpans(cells[cellIndex].spans, source: source, style: style, fontOverride: style.baseFont, indentLevel: 0))
+                if cellIndex < cellCount - 1 {
                     rowString.append(AttributedString(" | "))
                 }
             }
             result.append(rowString)
-            if index < rows.count - 1 {
+            if index < rowCount - 1 {
                 result.append(AttributedString("\n"))
             }
         }
         return result
     }
 
+    @inline(__always)
     private func renderHTML(_ html: HTMLBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
-        let prefix = String(repeating: " ", count: indentLevel)
-        return AttributedString(prefix) + applyBaseAttributes(AttributedString(html.content.string(in: source)), font: style.baseFont, color: style.textColor)
+        if indentLevel > 0 {
+            let prefix = String(repeating: " ", count: indentLevel)
+            return AttributedString(prefix) + applyBaseAttributes(AttributedString(html.content.string(in: source)), font: style.baseFont, color: style.textColor)
+        }
+        return applyBaseAttributes(AttributedString(html.content.string(in: source)), font: style.baseFont, color: style.textColor)
     }
 
+    @inline(__always)
     private func headingFont(level: Int, style: MarkdownStyle) -> Font {
         let index = max(0, min(level - 1, style.headingFonts.count - 1))
         return style.headingFonts[index]
     }
 
+    @inline(__always)
     private func applyBaseAttributes(_ string: AttributedString, font: Font, color: Color) -> AttributedString {
         var attributed = string
         attributed.font = font
         attributed.foregroundColor = color
         return attributed
     }
-
 }
