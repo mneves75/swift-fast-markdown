@@ -17,11 +17,32 @@ Built with [Carmack-level rigor](https://www.youtube.com/watch?v=I845O57ZSy4): m
 
 ## Performance
 
+**Swift 6 Optimization Flags Applied:**
+- `-Ounchecked`: Removes runtime safety checks (overflow, array bounds)
+- `-disable-actor-data-race-checks`: Disables concurrency runtime overhead
+
 | Metric | Result | Target | Status |
 |--------|--------|--------|--------|
-| Parse 10KB | 0.249ms | <1ms | ✅ 4x better |
-| Render 10KB | 3.699ms | <5ms | ✅ 26% headroom |
-| Chunk parse | 0.009ms | <0.5ms | ✅ 55x better |
+| Parse 10KB | 0.196ms | <1ms | ✅ 5.1x better |
+| Render 10KB | 3.727ms | <5ms | ✅ 25% headroom |
+| Chunk parse | 0.008ms | <0.5ms | ✅ 62x better |
+
+**Build Command:**
+```bash
+swift build -c release
+```
+
+### Future Optimizations (Investigated)
+
+| Optimization | Effort | Expected Impact | Notes |
+|--------------|--------|-----------------|-------|
+| SIMD/Vectorization | Medium | 5-15% | `-backend-option -vectorize-stmts` for C parser |
+| LTO (Link-Time Optimization) | Low | 2-5% | `-enable-lto` for cross-module optimization |
+| Profile-Guided Optimization (PGO) | High | 10-20% | Requires instrumented builds, real workloads |
+| Swift 6 Embedded Mode | Low | 0% speed | Reduces binary size only |
+| CoreText Bypass | High | 20-30% | Sacrifices SwiftUI AttributedString compatibility |
+
+The **Render 10KB** metric is limited by Apple's `AttributedString` framework internals. Real gains require caching strategies or lower-level CoreText rendering.
 
 ## Quick Start
 

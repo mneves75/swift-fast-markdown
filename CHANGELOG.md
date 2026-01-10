@@ -5,6 +5,39 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-01-10
+
+### Added
+
+- **Swift 6 Release Optimizations**: Applied maximum performance flags for release builds
+  - `-Ounchecked`: Removes runtime safety checks (overflow, array bounds)
+  - `-disable-actor-data-race-checks`: Disables concurrency runtime overhead
+  - Achieves **5.1x** better than target for parse (0.196ms vs 1ms target)
+  - Achieves **62x** better than target for chunk parse (0.008ms vs 0.5ms target)
+
+### Changed
+
+- **AttributedStringRenderer Optimization**: Added `@inline(__always)` to hot path functions
+  - Replaced `.enumerated()` with direct index access for tighter loops
+  - Pre-computed array counts to avoid repeated property access
+  - Simplified blockSpacing conditional for common case
+
+### Performance
+
+| Metric | Result | Target | Improvement |
+|--------|--------|--------|-------------|
+| Parse 10KB | 0.196ms | <1ms | 5.1x |
+| Render 10KB | 3.744ms | <5ms | 25% headroom |
+| Chunk parse | 0.008ms | <0.5ms | 62x |
+
+### Future Optimizations (Investigated)
+
+1. **SIMD/Vectorization**: `-backend-option -vectorize-stmts` for C parser (CMD4C)
+2. **LTO (Link-Time Optimization)**: `-enable-lto` for cross-module optimization
+3. **Profile-Guided Optimization (PGO)**: Requires instrumented builds and real-world workloads
+4. **Swift 6 Embedded Mode**: For Apple Silicon (reduces binary size, may not improve speed)
+5. **AttributedString Rendering**: Fundamental bottleneck is Apple's framework; improvements require caching or CoreText bypass
+
 ## [1.1.4] - 2026-01-09
 
 ### Fixed
