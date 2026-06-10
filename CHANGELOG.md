@@ -5,6 +5,18 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Refreshed the README performance table with full release-mode benchmark
+  numbers (median + p95 across 1KB/10KB/50KB parse and render, plus streaming
+  chunk append), measured as the quietest of 3 runs on Apple Silicon (M4 Pro).
+- Verified the README renders correctly on GitHub via the GitHub render API:
+  the performance table renders as a real `<table>` with right-aligned numeric
+  columns, the `<` in the target thresholds is safely escaped (not interpreted
+  as HTML), and the `→`/`×`/✅ glyphs display as intended.
+
 ## [1.2.0] - 2026-06-09
 
 Full security, architecture, and performance review. All 114 tests pass; all
