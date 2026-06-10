@@ -12,7 +12,8 @@ A comprehensive guide to using SwiftFastMarkdown in your iOS and macOS applicati
 6. [Task List Interactivity](#task-list-interactivity)
 7. [iOS 26 Liquid Glass](#ios-26-liquid-glass)
 8. [Performance Optimization](#performance-optimization)
-9. [Advanced Topics](#advanced-topics)
+9. [Security](#security)
+10. [Advanced Topics](#advanced-topics)
 
 ---
 
@@ -24,7 +25,7 @@ Add SwiftFastMarkdown to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mneves/swift-fast-markdown.git", from: "1.0.1")
+    .package(url: "https://github.com/mneves75/swift-fast-markdown.git", from: "1.2.0")
 ]
 ```
 
@@ -270,7 +271,7 @@ struct AdaptiveMarkdownView: View {
 
 ### Default Highlighter (highlight.js)
 
-The default syntax highlighter uses highlight.js via the HighlighterSwift package:
+The default syntax highlighter uses highlight.js via the Highlightr package:
 
 ```swift
 // Uses default highlighter automatically
@@ -285,7 +286,7 @@ MarkdownView(document: document, highlighter: highlighter)
 
 ```swift
 // Create with custom configuration
-if let highlighter = HighlighterSwiftEngine(
+if let highlighter = HighlightrEngine(
     configuration: .init(
         theme: "github-dark",     // highlight.js theme name
         fontName: "SF Mono",      // Optional custom font
@@ -496,15 +497,55 @@ The syntax highlighter uses an LRU cache. Adjust cache size based on your use ca
 
 ```swift
 // Larger cache for apps with many unique code snippets
-let highlighter = HighlighterSwiftEngine(
+let highlighter = HighlightrEngine(
     configuration: .init(cacheSize: 512)
 )
 
 // Smaller cache for memory-constrained environments
-let highlighter = HighlighterSwiftEngine(
+let highlighter = HighlightrEngine(
     configuration: .init(cacheSize: 64)
 )
 ```
+
+> `HighlightrEngine.init?` is failable — it returns `nil` if the underlying
+> JavaScriptCore engine cannot be created. Unwrap it (or fall back to
+> `SyntaxHighlightingFactory.makeDefault()`, which never fails).
+
+---
+
+## Security
+
+SwiftFastMarkdown assumes its input may be untrusted (LLM output, user text)
+and renders accordingly.
+
+### Link scheme validation
+
+Only safe schemes become tappable links. Everything else renders as plain text,
+so a malicious `[click me](javascript:…)` cannot produce an actionable link.
+
+```swift
+// Allowed:  http, https, mailto, tel, and relative (scheme-less) destinations
+// Rendered as plain text:  javascript:, data:, file:, and any other scheme
+
+// Example: this link's destination is dropped, the label still renders
+let document = try MarkdownParser().parse("[click me](javascript:alert(1))")
+let attributed = AttributedStringRenderer().render(document)
+// attributed has the text "click me" but no `.link` attribute
+```
+
+If you build URLs from markdown destinations yourself, reuse the same check:
+
+```swift
+if let url = AttributedStringRenderer.safeLinkURL(destinationString) {
+    // safe to open
+}
+```
+
+### No unsafe build flags
+
+The package ships without `.unsafeFlags`, so bounds and overflow checks remain
+enabled in the parser. This also makes it consumable as a remote SwiftPM
+dependency (SwiftPM refuses to resolve packages that use `.unsafeFlags`).
 
 ---
 
@@ -617,7 +658,7 @@ Task.detached {
 }
 
 // Safe: Highlighter is an actor with thread-safe JSContext access
-let highlighter = HighlighterSwiftEngine(configuration: .init())
+let highlighter = HighlightrEngine(configuration: .init())
 Task {
     let highlighted = await highlighter?.highlight(code: code, language: "swift")
 }

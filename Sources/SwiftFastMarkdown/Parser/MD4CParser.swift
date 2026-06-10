@@ -512,12 +512,9 @@ private final class ParserContext {
     static let debugLogCallback: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { _, _ in }
 
     private func stringFromPointer(_ text: UnsafePointer<MD_CHAR>?, size: MD_SIZE) -> String {
-        guard let basePointer, let text else { return "" }
-        let offset = Int(bitPattern: text) - Int(bitPattern: basePointer)
-        guard offset >= 0 else { return "" }
-        let end = offset + Int(size)
-        guard end <= sourceData.count else { return "" }
-        let slice = sourceData[offset..<end]
+        // Reuse pointerRange so all pointer→offset math shares the same bounds checks.
+        guard let range = pointerRange(text, size: size) else { return "" }
+        let slice = sourceData[Int(range.start)..<Int(range.end)]
         return String(decoding: slice, as: UTF8.self)
     }
 

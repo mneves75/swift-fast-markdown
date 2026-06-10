@@ -22,14 +22,14 @@ let package = Package(
         .package(url: "https://github.com/raspu/Highlightr.git", from: "2.3.0")
     ],
     targets: [
+        // No `.unsafeFlags` anywhere: SwiftPM refuses to resolve packages that
+        // use them as remote dependencies, and -Ounchecked/-ffast-math trade
+        // memory safety for negligible gains in a parser of untrusted input.
+        // Release builds already get optimized code from SwiftPM defaults.
         .target(
             name: "CMD4C",
             path: "Sources/CMD4C",
-            publicHeadersPath: "include",
-            cSettings: [
-                .unsafeFlags(["-O3"]),
-                .unsafeFlags(["-ffast-math"])
-            ]
+            publicHeadersPath: "include"
         ),
         .target(
             name: "SwiftFastMarkdown",
@@ -40,10 +40,6 @@ let package = Package(
             path: "Sources/SwiftFastMarkdown",
             resources: [
                 .process("Resources")
-            ],
-            swiftSettings: [
-                .unsafeFlags(["-Ounchecked"]),
-                .unsafeFlags(["-disable-actor-data-race-checks"])
             ]
         ),
         .executableTarget(

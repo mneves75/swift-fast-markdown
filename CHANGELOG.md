@@ -5,6 +5,58 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-09
+
+Full security, architecture, and performance review. All 114 tests pass; all
+v1.0 performance targets still pass after removing the unsafe build flags.
+
+### Security
+
+- **Link scheme validation**: `javascript:`, `data:`, `file:` and other unsafe
+  schemes are no longer attached as tappable links. Allowed: `http`, `https`,
+  `mailto`, `tel`, and scheme-less (relative) destinations. Markdown often
+  comes from untrusted sources (LLM output, user input).
+- **Removed all unsafe build flags** (`-Ounchecked`,
+  `-disable-actor-data-race-checks`, `-O3`, `-ffast-math`): they disabled
+  bounds/overflow checks in a parser of untrusted input — and `.unsafeFlags`
+  made the package impossible to consume as a remote SwiftPM dependency.
+  Benchmarks confirm all performance targets still pass without them.
+- Unified `stringFromPointer` with `pointerRange` in `MD4CParser` so all
+  pointer→offset math shares the same bounds checks.
+
+### Fixed
+
+- **Data race in `IncrementalMarkdownParser.buildDocument()`**: state was read
+  through a mix of locked and unlocked accessors, allowing torn reads during
+  concurrent streaming. All reads now go through a single-lock `snapshot()`.
+- **LRU bookkeeping drift in cached renderers**: re-rendering the same document
+  with a different style appended a duplicate id to the LRU order without
+  removing the stale one, skewing eviction counting.
+
+### Performance
+
+- `AttributedStringRenderer`: removed intermediate `AttributedString + AttributedString`
+  concatenations and per-call allocations of `"\n"`, `" "`, `" | "` and
+  thematic-break strings (now cached static constants). Render 10KB median
+  stays ~3.4ms — without `-Ounchecked`.
+- `CachedAttributedStringRenderer`: `MarkdownStyle` is now `Hashable`; the
+  per-render string-built style identifier was replaced by direct equality.
+- `IncrementalParser`: snapshot skips the `stableData + pendingData`
+  concatenation when nothing is pending.
+
+### Changed
+
+- `MarkdownStyle` now conforms to `Hashable`.
+- `StreamingMarkdownView`: removed redundant `lastProcessedContent` state
+  (`onChange(of:)` already fires only on real changes).
+- `IncrementalParser`: ~110 lines of duplicated byte-range offset logic
+  consolidated into the internal `BlockOffsetter`.
+
+### Removed
+
+- `IncrementalMarkdownParser.Configuration.minBufferSize`: documented a
+  buffering behavior that was never implemented (parameter was never read).
+
 ## [1.1.5] - 2026-01-10
 
 ### Performance

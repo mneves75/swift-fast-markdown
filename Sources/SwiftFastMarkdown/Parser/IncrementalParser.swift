@@ -33,13 +33,8 @@ public final class IncrementalMarkdownParser: Sendable {
         /// Parse options passed to md4c.
         public var options: ParseOptions
 
-        /// Minimum number of bytes to buffer before attempting boundary detection.
-        /// Lower values mean more responsive streaming but more parsing overhead.
-        public var minBufferSize: Int
-
-        public init(options: ParseOptions = .default, minBufferSize: Int = 64) {
+        public init(options: ParseOptions = .default) {
             self.options = options
-            self.minBufferSize = minBufferSize
         }
     }
 
@@ -93,40 +88,43 @@ public final class IncrementalMarkdownParser: Sendable {
 
     /// Returns the count of stable blocks parsed so far.
     public var stableBlockCount: Int {
-        state.stableBlocks.count
+        state.stableBlockCount
     }
 
     // MARK: - Private
 
     private func buildDocument() -> MarkdownDocument {
+        // Take one consistent snapshot of the state; reading individual
+        // properties separately could interleave with a concurrent append().
+        let snapshot = state.snapshot()
+
         // Parse pending buffer to get any incomplete blocks
         let pendingBlocks: [MarkdownBlock]
-        let fullData = state.fullData
-
-        if state.isFinalized || state.pendingBuffer.isEmpty {
+        if snapshot.isFinalized || snapshot.pendingData.isEmpty {
             pendingBlocks = []
-        } else {
-            // Parse just the pending portion
-            let pendingData = Data(state.pendingBuffer)
-            if let pendingDoc = try? parser.parse(pendingData, options: configuration.options) {
-                // Offset the blocks to account for stable content
-                pendingBlocks = pendingDoc.blocks.map { block in
-                    offsetBlock(block, by: UInt32(state.stableEndOffset))
-                }
-            } else {
-                pendingBlocks = []
+        } else if let pendingDoc = try? parser.parse(snapshot.pendingData, options: configuration.options) {
+            // Offset the blocks to account for stable content
+            pendingBlocks = pendingDoc.blocks.map { block in
+                BlockOffsetter.offsetBlock(block, by: UInt32(snapshot.stableEndOffset))
             }
+        } else {
+            pendingBlocks = []
         }
 
         return MarkdownDocument(
-            blocks: state.stableBlocks + pendingBlocks,
-            sourceData: fullData,
-            id: state.documentID
+            blocks: snapshot.stableBlocks + pendingBlocks,
+            sourceData: snapshot.fullData,
+            id: snapshot.documentID
         )
     }
+}
 
-    /// Offsets all byte ranges in a block by the given amount.
-    private func offsetBlock(_ block: MarkdownBlock, by offset: UInt32) -> MarkdownBlock {
+// MARK: - Byte Range Offsetting
+
+/// Pure functions that shift every byte range in a parsed block by a fixed
+/// offset, so blocks parsed from a buffer slice line up with the full document.
+enum BlockOffsetter {
+    static func offsetBlock(_ block: MarkdownBlock, by offset: UInt32) -> MarkdownBlock {
         guard offset > 0 else { return block }
 
         switch block {
@@ -176,18 +174,18 @@ public final class IncrementalMarkdownParser: Sendable {
         }
     }
 
-    private func offsetTableRow(_ row: TableRow, by offset: UInt32) -> TableRow {
+    private static func offsetTableRow(_ row: TableRow, by offset: UInt32) -> TableRow {
         let newCells = row.cells.map { cell in
             TableCell(id: cell.id, spans: offsetSpans(cell.spans, by: offset), alignment: cell.alignment)
         }
         return TableRow(id: row.id, cells: newCells)
     }
 
-    private func offsetSpans(_ spans: [MarkdownSpan], by offset: UInt32) -> [MarkdownSpan] {
+    private static func offsetSpans(_ spans: [MarkdownSpan], by offset: UInt32) -> [MarkdownSpan] {
         spans.map { offsetSpan($0, by: offset) }
     }
 
-    private func offsetSpan(_ span: MarkdownSpan, by offset: UInt32) -> MarkdownSpan {
+    private static func offsetSpan(_ span: MarkdownSpan, by offset: UInt32) -> MarkdownSpan {
         switch span {
         case .text(let content):
             return .text(offsetTextContent(content, by: offset))
@@ -226,7 +224,7 @@ public final class IncrementalMarkdownParser: Sendable {
         }
     }
 
-    private func offsetTextContent(_ content: TextContent, by offset: UInt32) -> TextContent {
+    private static func offsetTextContent(_ content: TextContent, by offset: UInt32) -> TextContent {
         switch content {
         case .bytes(let range):
             return .bytes(ByteRange(start: range.start + offset, end: range.end + offset))
@@ -254,32 +252,54 @@ public final class IncrementalMarkdownParser: Sendable {
 /// The @unchecked Sendable is appropriate because we manually verify that all
 /// mutable state access is protected by the lock.
 private final class IncrementalState: @unchecked Sendable {
+    /// A consistent view of the parser state, captured under a single lock
+    /// acquisition so concurrent appends can never produce torn reads.
+    struct Snapshot {
+        let stableBlocks: [MarkdownBlock]
+        let pendingData: Data
+        let stableEndOffset: Int
+        let fullData: Data
+        let isFinalized: Bool
+        let documentID: UUID
+    }
+
     private let lock = NSLock()
 
-    private(set) var stableBlocks: [MarkdownBlock] = []
-    private(set) var stableData: Data = Data()
-    private(set) var pendingBuffer: [UInt8] = []
-    private(set) var isFinalized: Bool = false
-    private(set) var documentID: UUID = UUID()
+    // All mutable state below is only accessed while holding `lock`.
+    private var stableBlocks: [MarkdownBlock] = []
+    private var stableData: Data = Data()
+    private var pendingBuffer: [UInt8] = []
+    private var finalized: Bool = false
+    private var documentID: UUID = UUID()
 
     private let parser = MD4CParser()
 
-    var stableEndOffset: Int {
+    func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        return stableData.count
+        let pendingData = Data(pendingBuffer)
+        return Snapshot(
+            stableBlocks: stableBlocks,
+            pendingData: pendingData,
+            stableEndOffset: stableData.count,
+            // Skip the concatenation when there is nothing pending (common
+            // right after a block boundary stabilizes).
+            fullData: pendingData.isEmpty ? stableData : stableData + pendingData,
+            isFinalized: finalized,
+            documentID: documentID
+        )
+    }
+
+    var stableBlockCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return stableBlocks.count
     }
 
     var pendingString: String {
         lock.lock()
         defer { lock.unlock() }
         return String(decoding: pendingBuffer, as: UTF8.self)
-    }
-
-    var fullData: Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return stableData + Data(pendingBuffer)
     }
 
     func append(_ chunk: String) {
@@ -290,7 +310,7 @@ private final class IncrementalState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !isFinalized else { return }
+        guard !finalized else { return }
 
         pendingBuffer.append(contentsOf: data)
         processStableBlocks()
@@ -300,15 +320,15 @@ private final class IncrementalState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !isFinalized else { return }
-        isFinalized = true
+        guard !finalized else { return }
+        finalized = true
 
         // Parse any remaining pending content as stable
         if !pendingBuffer.isEmpty {
             let pendingData = Data(pendingBuffer)
             if let doc = try? parser.parse(pendingData) {
                 let offsetBlocks = doc.blocks.map { block in
-                    offsetBlockInternal(block, by: UInt32(stableData.count))
+                    BlockOffsetter.offsetBlock(block, by: UInt32(stableData.count))
                 }
                 stableBlocks.append(contentsOf: offsetBlocks)
                 stableData.append(pendingData)
@@ -324,7 +344,7 @@ private final class IncrementalState: @unchecked Sendable {
         stableBlocks.removeAll()
         stableData.removeAll()
         pendingBuffer.removeAll()
-        isFinalized = false
+        finalized = false
         documentID = UUID()
     }
 
@@ -342,7 +362,7 @@ private final class IncrementalState: @unchecked Sendable {
         if let doc = try? parser.parse(stableContentData) {
             // Offset blocks to account for already-stable data
             let offsetBlocks = doc.blocks.map { block in
-                offsetBlockInternal(block, by: UInt32(stableData.count))
+                BlockOffsetter.offsetBlock(block, by: UInt32(stableData.count))
             }
             stableBlocks.append(contentsOf: offsetBlocks)
             stableData.append(stableContentData)
@@ -444,119 +464,5 @@ private final class IncrementalState: @unchecked Sendable {
 
         // Fence must be at least 3 characters
         return (length >= 3, length)
-    }
-
-    // MARK: - Block Offsetting (internal version without lock)
-
-    private func offsetBlockInternal(_ block: MarkdownBlock, by offset: UInt32) -> MarkdownBlock {
-        guard offset > 0 else { return block }
-
-        switch block {
-        case .paragraph(let p):
-            let newSpans = offsetSpansInternal(p.spans, by: offset)
-            let newRange = ByteRange(start: p.range.start + offset, end: p.range.end + offset)
-            return .paragraph(ParagraphBlock(id: p.id, spans: newSpans, range: newRange))
-
-        case .heading(let h):
-            let newSpans = offsetSpansInternal(h.spans, by: offset)
-            let newRange = ByteRange(start: h.range.start + offset, end: h.range.end + offset)
-            return .heading(HeadingBlock(id: h.id, level: h.level, spans: newSpans, range: newRange))
-
-        case .codeBlock(let c):
-            let newContent = offsetTextContentInternal(c.content, by: offset)
-            let newInfo = c.info.map { offsetTextContentInternal($0, by: offset) }
-            let newLang = c.language.map { offsetTextContentInternal($0, by: offset) }
-            return .codeBlock(CodeBlock(id: c.id, info: newInfo, language: newLang, content: newContent, fence: c.fence))
-
-        case .blockQuote(let q):
-            let newBlocks = q.blocks.map { offsetBlockInternal($0, by: offset) }
-            return .blockQuote(BlockQuoteBlock(id: q.id, blocks: newBlocks))
-
-        case .list(let l):
-            let newItems = l.items.map { item in
-                ListItemBlock(
-                    id: item.id,
-                    blocks: item.blocks.map { offsetBlockInternal($0, by: offset) },
-                    isTask: item.isTask,
-                    isChecked: item.isChecked
-                )
-            }
-            return .list(ListBlock(id: l.id, ordered: l.ordered, start: l.start, delimiter: l.delimiter, isTight: l.isTight, items: newItems))
-
-        case .table(let t):
-            let newHeaderRows = t.headerRows.map { offsetTableRowInternal($0, by: offset) }
-            let newBodyRows = t.bodyRows.map { offsetTableRowInternal($0, by: offset) }
-            return .table(TableBlock(id: t.id, alignments: t.alignments, headerRows: newHeaderRows, bodyRows: newBodyRows))
-
-        case .thematicBreak(let tb):
-            let newRange = ByteRange(start: tb.range.start + offset, end: tb.range.end + offset)
-            return .thematicBreak(ThematicBreakBlock(id: tb.id, range: newRange))
-
-        case .htmlBlock(let h):
-            let newContent = offsetTextContentInternal(h.content, by: offset)
-            return .htmlBlock(HTMLBlock(id: h.id, content: newContent))
-        }
-    }
-
-    private func offsetTableRowInternal(_ row: TableRow, by offset: UInt32) -> TableRow {
-        let newCells = row.cells.map { cell in
-            TableCell(id: cell.id, spans: offsetSpansInternal(cell.spans, by: offset), alignment: cell.alignment)
-        }
-        return TableRow(id: row.id, cells: newCells)
-    }
-
-    private func offsetSpansInternal(_ spans: [MarkdownSpan], by offset: UInt32) -> [MarkdownSpan] {
-        spans.map { offsetSpanInternal($0, by: offset) }
-    }
-
-    private func offsetSpanInternal(_ span: MarkdownSpan, by offset: UInt32) -> MarkdownSpan {
-        switch span {
-        case .text(let content):
-            return .text(offsetTextContentInternal(content, by: offset))
-        case .emphasis(let children):
-            return .emphasis(offsetSpansInternal(children, by: offset))
-        case .strong(let children):
-            return .strong(offsetSpansInternal(children, by: offset))
-        case .strikethrough(let children):
-            return .strikethrough(offsetSpansInternal(children, by: offset))
-        case .underline(let children):
-            return .underline(offsetSpansInternal(children, by: offset))
-        case .code(let content):
-            return .code(offsetTextContentInternal(content, by: offset))
-        case .link(let children, let dest, let title):
-            return .link(
-                children: offsetSpansInternal(children, by: offset),
-                destination: dest.map { offsetTextContentInternal($0, by: offset) },
-                title: title.map { offsetTextContentInternal($0, by: offset) }
-            )
-        case .image(let alt, let src, let title):
-            return .image(
-                alt: offsetSpansInternal(alt, by: offset),
-                source: src.map { offsetTextContentInternal($0, by: offset) },
-                title: title.map { offsetTextContentInternal($0, by: offset) }
-            )
-        case .wikiLink(let target, let children):
-            return .wikiLink(target: offsetTextContentInternal(target, by: offset), children: offsetSpansInternal(children, by: offset))
-        case .html(let content):
-            return .html(offsetTextContentInternal(content, by: offset))
-        case .latexInline(let content):
-            return .latexInline(offsetTextContentInternal(content, by: offset))
-        case .latexDisplay(let content):
-            return .latexDisplay(offsetTextContentInternal(content, by: offset))
-        case .lineBreak, .softBreak:
-            return span
-        }
-    }
-
-    private func offsetTextContentInternal(_ content: TextContent, by offset: UInt32) -> TextContent {
-        switch content {
-        case .bytes(let range):
-            return .bytes(ByteRange(start: range.start + offset, end: range.end + offset))
-        case .sequence(let seq):
-            let newRanges = seq.ranges.map { ByteRange(start: $0.start + offset, end: $0.end + offset) }
-            return .sequence(ByteRangeSequence(newRanges))
-        case .string:
-            return content
-        }
     }
 }

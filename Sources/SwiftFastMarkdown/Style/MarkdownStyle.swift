@@ -1,6 +1,6 @@
 import SwiftUI
 
-public struct MarkdownStyle: Sendable {
+public struct MarkdownStyle: Sendable, Hashable {
     public var baseFont: Font
     public var codeFont: Font
     public var headingFonts: [Font]

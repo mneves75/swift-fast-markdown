@@ -2,6 +2,24 @@ import Foundation
 import SwiftUI
 
 public struct AttributedStringRenderer {
+    private static let newline = AttributedString("\n")
+    private static let space = AttributedString(" ")
+    private static let cellSeparator = AttributedString(" | ")
+    private static let thematicBreakString = AttributedString(String(repeating: "—", count: 20))
+
+    /// Schemes considered safe to expose as tappable links. Markdown often comes
+    /// from untrusted sources (LLM output, user input); anything else —
+    /// javascript:, data:, file:, etc. — is rendered as plain text.
+    private static let allowedLinkSchemes: Set<String> = ["http", "https", "mailto", "tel"]
+
+    /// Returns a URL only when the destination is safe to attach as a link.
+    /// Scheme-less (relative) destinations are allowed.
+    static func safeLinkURL(_ destination: String) -> URL? {
+        guard let url = URL(string: destination) else { return nil }
+        guard let scheme = url.scheme else { return url }
+        return allowedLinkSchemes.contains(scheme.lowercased()) ? url : nil
+    }
+
     public init() {}
 
     public func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
@@ -10,14 +28,13 @@ public struct AttributedStringRenderer {
         let blockCount = blocks.count
         let blockSpacing = style.blockSpacing
 
+        let separator = blockSpacing > 1
+            ? AttributedString(String(repeating: "\n", count: blockSpacing))
+            : Self.newline
         for index in blocks.indices {
             result.append(renderBlock(blocks[index], source: document.sourceData, style: style, indentLevel: 0))
             if index < blockCount - 1 {
-                if blockSpacing > 1 {
-                    result.append(AttributedString(String(repeating: "\n", count: blockSpacing)))
-                } else {
-                    result.append(AttributedString("\n"))
-                }
+                result.append(separator)
             }
         }
         return result
@@ -49,7 +66,7 @@ public struct AttributedStringRenderer {
         case .table(let table):
             return renderTable(table, source: source, style: style, indentLevel: indentLevel)
         case .thematicBreak:
-            return AttributedString(String(repeating: "—", count: 20))
+            return Self.thematicBreakString
         case .htmlBlock(let html):
             return renderHTML(html, source: source, style: style, indentLevel: indentLevel)
         }
@@ -63,13 +80,11 @@ public struct AttributedStringRenderer {
         fontOverride: Font,
         indentLevel: Int
     ) -> AttributedString {
-        var result = AttributedString()
+        var result = indentLevel > 0
+            ? AttributedString(String(repeating: " ", count: indentLevel))
+            : AttributedString()
         for span in spans {
             result.append(renderSpan(span, source: source, style: style, fontOverride: fontOverride))
-        }
-        if indentLevel > 0 {
-            let prefix = String(repeating: " ", count: indentLevel)
-            return AttributedString(prefix) + result
         }
         return result
     }
@@ -107,27 +122,22 @@ public struct AttributedStringRenderer {
         case .link(let children, let destination, _):
             var attributed = renderInline(children, source: source, style: style, fontOverride: fontOverride)
             attributed.foregroundColor = style.linkColor
-            if let destination {
-                let link = destination.string(in: source)
-                if let url = URL(string: link) {
-                    attributed.link = url
-                }
+            if let destination, let url = Self.safeLinkURL(destination.string(in: source)) {
+                attributed.link = url
             }
             return attributed
         case .image(let alt, _, _):
             return renderInline(alt, source: source, style: style, fontOverride: fontOverride)
         case .lineBreak:
-            return AttributedString("\n")
+            return Self.newline
         case .softBreak:
-            return AttributedString(" ")
+            return Self.space
         case .html(let content):
             return applyBaseAttributes(AttributedString(content.string(in: source)), font: fontOverride, color: style.textColor)
         case .wikiLink(let target, let children):
-            let label = renderInline(children, source: source, style: style, fontOverride: fontOverride)
-            var attributed = label
+            var attributed = renderInline(children, source: source, style: style, fontOverride: fontOverride)
             attributed.foregroundColor = style.linkColor
-            let link = target.string(in: source)
-            if let url = URL(string: link) {
+            if let url = Self.safeLinkURL(target.string(in: source)) {
                 attributed.link = url
             }
             return attributed
@@ -152,27 +162,27 @@ public struct AttributedStringRenderer {
 
     @inline(__always)
     private func renderCodeBlock(_ codeBlock: CodeBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
-        var content = AttributedString(codeBlock.content.string(in: source))
-        content = applyBaseAttributes(content, font: style.codeFont, color: style.codeTextColor)
+        var content = applyBaseAttributes(AttributedString(codeBlock.content.string(in: source)), font: style.codeFont, color: style.codeTextColor)
         content.backgroundColor = style.codeBackgroundColor
         if indentLevel > 0 {
-            let prefix = String(repeating: " ", count: indentLevel)
-            return AttributedString(prefix) + content
+            var result = AttributedString(String(repeating: " ", count: indentLevel))
+            result.append(content)
+            return result
         }
         return content
     }
 
     @inline(__always)
     private func renderBlockQuote(_ quote: BlockQuoteBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
-        let prefix = String(repeating: " ", count: indentLevel) + "› "
+        let prefix = AttributedString(String(repeating: " ", count: indentLevel) + "› ")
         var result = AttributedString()
         let blocks = quote.blocks
         let count = blocks.count
         for index in blocks.indices {
-            result.append(AttributedString(prefix))
+            result.append(prefix)
             result.append(renderBlock(blocks[index], source: source, style: style, indentLevel: indentLevel + style.listIndent))
             if index < count - 1 {
-                result.append(AttributedString("\n"))
+                result.append(Self.newline)
             }
         }
         return result
@@ -186,26 +196,21 @@ public struct AttributedStringRenderer {
         let ordered = list.ordered
         let start = list.start
 
+        let prefix = AttributedString(String(repeating: " ", count: indentLevel))
         for index in items.indices {
-            let marker: String
-            if ordered {
-                marker = "\(start + index). "
-            } else {
-                marker = "• "
-            }
-            var renderedItem = AttributedString(marker)
+            let marker = ordered ? "\(start + index). " : "• "
+            result.append(prefix)
+            result.append(AttributedString(marker))
             let blocks = items[index].blocks
             let blockCount = blocks.count
             for blockIndex in blocks.indices {
-                renderedItem.append(renderBlock(blocks[blockIndex], source: source, style: style, indentLevel: indentLevel + style.listIndent))
+                result.append(renderBlock(blocks[blockIndex], source: source, style: style, indentLevel: indentLevel + style.listIndent))
                 if blockIndex < blockCount - 1 {
-                    renderedItem.append(AttributedString("\n"))
+                    result.append(Self.newline)
                 }
             }
-            let prefix = String(repeating: " ", count: indentLevel)
-            result.append(AttributedString(prefix) + renderedItem)
             if index < count - 1 {
-                result.append(AttributedString("\n"))
+                result.append(Self.newline)
             }
         }
         return result
@@ -215,23 +220,21 @@ public struct AttributedStringRenderer {
     private func renderTable(_ table: TableBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
         let rows = table.headerRows + table.bodyRows
         guard !rows.isEmpty else { return AttributedString() }
-        let prefix = String(repeating: " ", count: indentLevel)
+        let prefix = AttributedString(String(repeating: " ", count: indentLevel))
         var result = AttributedString()
         let rowCount = rows.count
         for index in rows.indices {
-            let row = rows[index]
-            let cells = row.cells
+            let cells = rows[index].cells
             let cellCount = cells.count
-            var rowString = AttributedString(prefix)
+            result.append(prefix)
             for cellIndex in cells.indices {
-                rowString.append(renderSpans(cells[cellIndex].spans, source: source, style: style, fontOverride: style.baseFont, indentLevel: 0))
+                result.append(renderSpans(cells[cellIndex].spans, source: source, style: style, fontOverride: style.baseFont, indentLevel: 0))
                 if cellIndex < cellCount - 1 {
-                    rowString.append(AttributedString(" | "))
+                    result.append(Self.cellSeparator)
                 }
             }
-            result.append(rowString)
             if index < rowCount - 1 {
-                result.append(AttributedString("\n"))
+                result.append(Self.newline)
             }
         }
         return result
@@ -239,11 +242,13 @@ public struct AttributedStringRenderer {
 
     @inline(__always)
     private func renderHTML(_ html: HTMLBlock, source: Data, style: MarkdownStyle, indentLevel: Int) -> AttributedString {
+        let content = applyBaseAttributes(AttributedString(html.content.string(in: source)), font: style.baseFont, color: style.textColor)
         if indentLevel > 0 {
-            let prefix = String(repeating: " ", count: indentLevel)
-            return AttributedString(prefix) + applyBaseAttributes(AttributedString(html.content.string(in: source)), font: style.baseFont, color: style.textColor)
+            var result = AttributedString(String(repeating: " ", count: indentLevel))
+            result.append(content)
+            return result
         }
-        return applyBaseAttributes(AttributedString(html.content.string(in: source)), font: style.baseFont, color: style.textColor)
+        return content
     }
 
     @inline(__always)

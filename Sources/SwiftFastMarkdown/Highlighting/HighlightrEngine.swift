@@ -113,16 +113,4 @@ private struct HighlightKey: Hashable {
     let theme: String
     let language: String?
     let code: String  // Full code content for collision-free comparison
-
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(theme)
-        hasher.combine(language)
-        hasher.combine(code.hashValue)  // Use hash for performance
-    }
-
-    static func == (lhs: HighlightKey, rhs: HighlightKey) -> Bool {
-        lhs.theme == rhs.theme &&
-        lhs.language == rhs.language &&
-        lhs.code == rhs.code  // Full comparison to prevent hash collisions
-    }
 }

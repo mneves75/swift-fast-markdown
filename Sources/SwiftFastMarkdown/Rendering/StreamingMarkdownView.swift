@@ -31,10 +31,6 @@ public struct StreamingMarkdownView: View {
 
     @State private var parser: IncrementalMarkdownParser
     @State private var document: MarkdownDocument
-    /// Tracks the last processed content to avoid redundant reparsing.
-    /// Note: Using direct string comparison instead of hashValue to prevent
-    /// hash collisions from causing missed updates.
-    @State private var lastProcessedContent: String = ""
 
     public init(
         content: Binding<String>,
@@ -102,11 +98,8 @@ public struct StreamingMarkdownView: View {
     }
 
     private func updateDocument(from oldValue: String, to newValue: String) {
-        // Direct string comparison prevents hash collision edge cases where
-        // different content could produce the same hashValue, causing missed updates.
-        guard newValue != lastProcessedContent else { return }
-        lastProcessedContent = newValue
-
+        // onChange(of:) only fires when the value actually changed (Equatable),
+        // so no extra "last processed" bookkeeping is needed here.
         if newValue.isEmpty {
             // Content cleared - reset parser
             parser.reset()

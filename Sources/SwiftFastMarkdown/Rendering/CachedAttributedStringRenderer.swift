@@ -38,26 +38,22 @@ public actor CachedAttributedStringRenderer {
     ///   - style: The style to apply during rendering.
     /// - Returns: The rendered AttributedString.
     public func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
-        let key = CacheKey(document: document, style: style)
-
-        if let cached = cache[key.id] {
-            // Check if style matches
-            if cached.styleIdentifier == key.styleIdentifier {
-                // Move to front (most recently used)
-                if let index = lruOrder.firstIndex(of: key.id) {
-                    lruOrder.remove(at: index)
-                    lruOrder.append(key.id)
-                }
-                return cached.attributedString
+        if let cached = cache[document.id], cached.style == style {
+            // Move to front (most recently used)
+            if let index = lruOrder.firstIndex(of: document.id) {
+                lruOrder.remove(at: index)
+                lruOrder.append(document.id)
             }
+            return cached.attributedString
         }
 
         let result = renderer.render(document, style: style)
-        let entry = CachedEntry(attributedString: result, styleIdentifier: key.styleIdentifier)
-
-        // Add to cache
-        cache[key.id] = entry
-        lruOrder.append(key.id)
+        // Replacing an entry (same document, new style) must not leave a stale
+        // id in lruOrder, or eviction counting drifts from the real cache size.
+        if cache.updateValue(CachedEntry(attributedString: result, style: style), forKey: document.id) != nil {
+            lruOrder.removeAll { $0 == document.id }
+        }
+        lruOrder.append(document.id)
 
         // Evict oldest entry if over capacity
         if lruOrder.count > maxCacheSize {
@@ -83,44 +79,12 @@ public actor CachedAttributedStringRenderer {
 
 // MARK: - Cache Entry
 
-/// A single cache entry containing the rendered AttributedString and style info.
+/// A single cache entry containing the rendered AttributedString and the style
+/// it was rendered with. MarkdownStyle is Hashable, so a direct equality check
+/// replaces the previous string-based style identifier.
 private struct CachedEntry {
     let attributedString: AttributedString
-    let styleIdentifier: String
-}
-
-// MARK: - Cache Key
-
-/// A cache key combining document identity and optional style identifier.
-private struct CacheKey {
-    let id: UUID
-    let styleIdentifier: String
-
-    init(document: MarkdownDocument, style: MarkdownStyle) {
-        self.id = document.id
-        self.styleIdentifier = Self.computeStyleIdentifier(style)
-    }
-
-    /// Computes a stable identifier for the style using all relevant properties.
-    /// This ensures different styles produce different cache keys.
-    private static func computeStyleIdentifier(_ style: MarkdownStyle) -> String {
-        // Use description which provides stable string representation
-        // for all Font, Color, and Int properties
-        let fontDescriptions = style.headingFonts.map { "\($0)" }.joined(separator: ",")
-
-        return [
-            "baseFont:\(style.baseFont)",
-            "codeFont:\(style.codeFont)",
-            "headingFonts:[\(fontDescriptions)]",
-            "linkColor:\(style.linkColor)",
-            "textColor:\(style.textColor)",
-            "codeTextColor:\(style.codeTextColor)",
-            "codeBackgroundColor:\(style.codeBackgroundColor)",
-            "quoteStripeColor:\(style.quoteStripeColor)",
-            "blockSpacing:\(style.blockSpacing)",
-            "listIndent:\(style.listIndent)"
-        ].joined(separator: "|")
-    }
+    let style: MarkdownStyle
 }
 
 // MARK: - Synchronous Thread-Safe Renderer
@@ -154,28 +118,25 @@ public final class ThreadSafeCachedRenderer {
     ///   - style: The style to apply during rendering.
     /// - Returns: The rendered AttributedString.
     public func render(_ document: MarkdownDocument, style: MarkdownStyle = .default) -> AttributedString {
-        let key = CacheKey(document: document, style: style)
-
         lock.lock()
         defer { lock.unlock() }
 
-        if let cached = cache[key.id] {
-            // Check if style matches
-            if cached.styleIdentifier == key.styleIdentifier {
-                // Move to front (MRU)
-                if let index = lruOrder.firstIndex(of: key.id) {
-                    lruOrder.remove(at: index)
-                    lruOrder.append(key.id)
-                }
-                return cached.attributedString
+        if let cached = cache[document.id], cached.style == style {
+            // Move to front (MRU)
+            if let index = lruOrder.firstIndex(of: document.id) {
+                lruOrder.remove(at: index)
+                lruOrder.append(document.id)
             }
+            return cached.attributedString
         }
 
         let result = renderer.render(document, style: style)
-        let entry = CachedEntry(attributedString: result, styleIdentifier: key.styleIdentifier)
-
-        cache[key.id] = entry
-        lruOrder.append(key.id)
+        // Replacing an entry (same document, new style) must not leave a stale
+        // id in lruOrder, or eviction counting drifts from the real cache size.
+        if cache.updateValue(CachedEntry(attributedString: result, style: style), forKey: document.id) != nil {
+            lruOrder.removeAll { $0 == document.id }
+        }
+        lruOrder.append(document.id)
 
         // Evict oldest entry if over capacity
         if lruOrder.count > maxCacheSize {

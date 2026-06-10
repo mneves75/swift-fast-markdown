@@ -14,45 +14,48 @@ Built with [Carmack-level rigor](https://www.youtube.com/watch?v=I845O57ZSy4): m
 - **GFM Extensions**: Tables, task lists, strikethrough, autolinks via md4c flags
 - **Syntax Highlighting**: Pluggable protocol with thread-safe highlight.js implementation
 - **iOS 26 Liquid Glass**: Native glass effects with iOS 18 material fallback
-- **106 Tests**: Comprehensive test coverage including CommonMark spec compliance
+- **Safe by default**: link schemes validated, no unsafe build flags
+- **114 Tests**: Comprehensive test coverage including CommonMark spec compliance
 
 ## Performance
 
-**Optimization Flags Applied:**
-- Swift: `-Ounchecked`, `-disable-actor-data-race-checks`
-- C (md4c): `-O3`, `-ffast-math`
+Built with SwiftPM's default release optimizations (`-O` for Swift, `-O2` for
+C) — **no `.unsafeFlags`**, so the package is consumable as a remote SwiftPM
+dependency and keeps bounds/overflow checks for untrusted input.
 
 | Metric | Result | Target | Status |
 |--------|--------|--------|--------|
-| Parse 10KB | 0.191ms | <1ms | ✅ 5.2x better |
-| Render 10KB | ~3.7ms | <5ms | ✅ 25% headroom |
+| Parse 10KB | 0.22ms | <1ms | ✅ 4.5x better |
+| Render 10KB | ~3.4ms | <5ms | ✅ 32% headroom |
 | Chunk parse | 0.008ms | <0.5ms | ✅ 62x better |
+
+Measured via `swift run -c release SwiftFastMarkdownBenchmarks` on Apple Silicon.
 
 **Build Command:**
 ```bash
 swift build -c release
 ```
 
-### Applied Optimizations
+### Why no unsafe flags
 
-| Optimization | Impact | Status |
-|--------------|--------|--------|
-| Swift 6 `-Ounchecked` | Parse 5.2x better | ✅ Applied |
-| Concurrency checks disabled | Chunk parse 62x better | ✅ Applied |
-| C `-O3` for md4c | Parse 2% better | ✅ Applied |
-| AttributedString Caching | Near-instant repeated renders | ✅ Applied |
+Earlier releases applied `-Ounchecked`, `-disable-actor-data-race-checks`,
+`-O3` and `-ffast-math`. These were removed in 1.2.0 because:
 
-### Future Optimizations (Investigated)
+- `.unsafeFlags` makes a package **impossible to consume** as a remote SwiftPM
+  dependency (SwiftPM refuses to resolve it).
+- `-Ounchecked` disables bounds and overflow traps — unacceptable for a parser
+  whose input is frequently untrusted (LLM output, user text).
+- Benchmarks show all v1.0 targets still pass on SwiftPM's default release
+  optimization, so the safety trade was buying almost nothing.
 
-| Optimization | Effort | Expected Impact | Notes |
-|--------------|--------|-----------------|-------|
-| LTO (Link-Time Optimization) | Medium | 3-4% | ⚠️ Breaks Swift 6.2 build (known issue) |
-| SIMD/Vectorization | Medium | ~0% | md4c is state-machine based, not data-parallel |
-| Profile-Guided Optimization (PGO) | High | 10-20% | Requires instrumented builds, real workloads |
-| Swift 6 Embedded Mode | Low | 0% speed | Reduces binary size only |
-| CoreText Bypass | High | 20-30% | Sacrifices SwiftUI AttributedString compatibility |
+### Where the speed comes from
 
-**Note:** LTO showed 3.9% render improvement in testing but causes link errors with Swift 6.2. This is a known Swift toolchain issue that may be resolved in future releases.
+| Technique | Impact |
+|-----------|--------|
+| Zero-copy `ByteRange` IR | Minimal allocation during parse |
+| Cached static `AttributedString` constants | No per-line-break allocations |
+| O(n) incremental parser | Sub-millisecond chunk appends |
+| `CachedAttributedStringRenderer` | Near-instant repeated renders |
 
 ## Quick Start
 
@@ -79,7 +82,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mneves/swift-fast-markdown.git", from: "1.0.1")
+    .package(url: "https://github.com/mneves75/swift-fast-markdown.git", from: "1.2.0")
 ]
 ```
 
@@ -98,7 +101,7 @@ dependencies: [
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   SwiftFastMarkdown v1.0.1                  │
+│                   SwiftFastMarkdown v1.2.0                  │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 3: Rendering                                         │
 │  ├── MarkdownView (rich, block-level views)                 │
@@ -131,15 +134,26 @@ dependencies: [
 All public APIs are thread-safe:
 
 - `MarkdownParser` - Stateless, safe for concurrent use
-- `IncrementalMarkdownParser` - Internal locking via NSLock
-- `HighlighterSwiftEngine` - Actor with dedicated queue for JavaScriptCore thread-affinity
+- `IncrementalMarkdownParser` - Internal locking via NSLock, single-snapshot reads
+- `HighlightrEngine` - Actor isolating the non-Sendable Highlightr/JavaScriptCore engine
 - `LRUCache` - Wrapped in actor for thread-safe access
+
+## Security
+
+Markdown is frequently untrusted (LLM output, user-submitted text), so the
+renderer treats it that way:
+
+- **Link schemes are validated.** Only `http`, `https`, `mailto`, `tel`, and
+  relative (scheme-less) destinations become tappable links. `javascript:`,
+  `data:`, `file:`, etc. render as plain text.
+- **No unsafe build flags**, so bounds and overflow checks stay enabled in the
+  parser's hot paths.
 
 ## Requirements
 
 - iOS 18.0+ / macOS 15.0+
-- Swift 6.0+
-- Xcode 16.0+
+- Swift 6.2+
+- Xcode 26.0+
 
 ## Documentation
 
