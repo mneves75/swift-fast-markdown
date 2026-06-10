@@ -23,13 +23,26 @@ Built with SwiftPM's default release optimizations (`-O` for Swift, `-O2` for
 C) — **no `.unsafeFlags`**, so the package is consumable as a remote SwiftPM
 dependency and keeps bounds/overflow checks for untrusted input.
 
-| Metric | Result | Target | Status |
-|--------|--------|--------|--------|
-| Parse 10KB | 0.22ms | <1ms | ✅ 4.5x better |
-| Render 10KB | ~3.4ms | <5ms | ✅ 32% headroom |
-| Chunk parse | 0.008ms | <0.5ms | ✅ 62x better |
+| Operation | Median | p95 | Target (median) | Status |
+|-----------|-------:|----:|-----------------|--------|
+| Parse ~1KB | 0.004 ms | 0.005 ms | — | — |
+| Parse ~10KB | 0.215 ms | 0.238 ms | < 1 ms | ✅ 4.7× better |
+| Parse ~50KB | 1.19 ms | 1.27 ms | — | — |
+| Render ~10KB → AttributedString | 3.30 ms | 3.53 ms | < 5 ms | ✅ 34% headroom |
+| Render ~50KB → AttributedString | 11.4 ms | 12.2 ms | — | — |
+| Streaming chunk append (256 B) | 0.009 ms | 0.014 ms | < 0.5 ms | ✅ 55× better |
 
-Measured via `swift run -c release SwiftFastMarkdownBenchmarks` on Apple Silicon.
+100 iterations + 10 warmup per operation, quietest of 3 release runs on Apple
+Silicon (M4 Pro). Reproduce with:
+
+```bash
+swift run -c release SwiftFastMarkdownBenchmarks
+```
+
+Render time scales with document size and `AttributedString` allocation, and its
+tail is sensitive to system memory pressure — for large or live content prefer
+the incremental/streaming path (`StreamingMarkdownView`), whose per-chunk append
+stays in the single-digit microseconds.
 
 **Build Command:**
 ```bash
