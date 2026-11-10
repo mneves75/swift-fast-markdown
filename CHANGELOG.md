@@ -5,6 +5,14 @@ All notable changes to SwiftFastMarkdown will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Agent enforcement: a new `.claude/settings.json` refuses edits to the vendored md4c sources in
+  `Sources/CMD4C/` (an upstream update is a deliberate owner step) and adds a Stop gate on
+  `swift test`. No library change.
+
 ## [1.2.0] - 2026-06-09
 
 Full security, architecture, and performance review. All 114 tests pass; all
