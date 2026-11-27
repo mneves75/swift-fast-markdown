@@ -82,7 +82,7 @@ Earlier releases applied `-Ounchecked`, `-disable-actor-data-race-checks`,
 import SwiftFastMarkdown
 
 // Simple rendering
-let document = MarkdownParser.parse("# Hello **World**")
+let document = try MarkdownParser().parse("# Hello **World**")
 MarkdownView(document: document)
 
 // Streaming for AI chat
@@ -155,7 +155,7 @@ All public APIs are thread-safe:
 - `MarkdownParser` - Stateless, safe for concurrent use
 - `IncrementalMarkdownParser` - Internal locking via a single `NSLock` for all state reads and mutations
 - `HighlightrEngine` - Actor isolating the non-Sendable Highlightr/JavaScriptCore engine
-- `LRUCache` - Wrapped in actor for thread-safe access
+- `LRUCache` - Internal data structure synchronized via actor isolation (`CachedAttributedStringRenderer`, `HighlightrEngine`) and `NSLock` (`ThreadSafeCachedRenderer`)
 
 ## Security
 

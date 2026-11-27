@@ -82,7 +82,7 @@ Key design points:
 
 ## Public surface
 
-Entry points: `MarkdownParser` (static), `IncrementalMarkdownParser` (streaming),
+Entry points: `MarkdownParser` (full-document parser, plus `SwiftFastMarkdown.parse` static convenience), `IncrementalMarkdownParser` (streaming),
 `MarkdownView` / `FastMarkdownText` / `StreamingMarkdownView` / `AsyncStreamMarkdownView`
 (SwiftUI), `AttributedStringRenderer` / `CachedAttributedStringRenderer`
 (AttributedString), `MarkdownStyle` (theming), `SyntaxHighlighting` +

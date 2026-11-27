@@ -65,10 +65,10 @@ struct ContentView: View {
 
     var body: some View {
         ScrollView {
-            MarkdownView(
-                document: MarkdownParser.parse(markdown)
-            )
-            .padding()
+            if let document = try? MarkdownParser().parse(markdown) {
+                MarkdownView(document: document)
+                    .padding()
+            }
         }
     }
 }
@@ -93,7 +93,7 @@ struct SimpleMarkdownView: View {
 For use with standard SwiftUI `Text` or UIKit:
 
 ```swift
-let document = MarkdownParser.parse("Hello **World**")
+let document = try MarkdownParser().parse("Hello **World**")
 let renderer = AttributedStringRenderer()
 let attributed = renderer.render(document, style: .default)
 
@@ -580,7 +580,7 @@ dependency (SwiftPM refuses to resolve packages that use `.unsafeFlags`).
 Access the parsed document structure directly:
 
 ```swift
-let document = MarkdownParser.parse(markdown)
+let document = try MarkdownParser().parse(markdown)
 
 for block in document.blocks {
     switch block {
@@ -588,14 +588,15 @@ for block in document.blocks {
         print("Heading level \(heading.level)")
 
     case .codeBlock(let code):
-        let content = code.codeRange.string(in: document.sourceData)
-        print("Code (\(code.language ?? "plain")): \(content)")
+        let content = code.content.string(in: document.sourceData)
+        let language = code.language?.string(in: document.sourceData) ?? "plain"
+        print("Code (\(language)): \(content)")
 
     case .list(let list):
         print("List with \(list.items.count) items")
 
     case .table(let table):
-        print("Table: \(table.header.count) columns")
+        print("Table: \(table.alignments.count) columns")
 
     default:
         break
@@ -608,16 +609,17 @@ for block in document.blocks {
 Extract text efficiently without copying:
 
 ```swift
-let document = MarkdownParser.parse("Hello **World**")
+let document = try MarkdownParser().parse("Hello **World**")
 
-// Get text from a span's byte range
+// Get text from a span's TextContent
 if case .paragraph(let para) = document.blocks.first,
-   case .strong(let strong) = para.spans.first(where: {
+   case .strong(let children) = para.spans.first(where: {
        if case .strong = $0 { return true }
        return false
-   }) {
+   }),
+   case .text(let content) = children.first {
     // Zero-copy string extraction
-    let text = strong.textRange.string(in: document.sourceData)
+    let text = content.string(in: document.sourceData)
     print(text) // "World"
 }
 ```
@@ -664,7 +666,7 @@ All public APIs are designed for concurrent use:
 ```swift
 // Safe: Parsing on background thread
 Task.detached {
-    let document = MarkdownParser.parse(largeMarkdown)
+    let document = try MarkdownParser().parse(largeMarkdown)
     await MainActor.run {
         self.document = document
     }
@@ -761,7 +763,7 @@ struct DocViewer: View {
         .task {
             do {
                 let content = try String(contentsOf: markdownURL)
-                document = MarkdownParser.parse(content)
+                document = try MarkdownParser().parse(content)
             } catch {
                 self.error = error
             }
