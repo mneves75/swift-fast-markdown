@@ -484,5 +484,16 @@ struct SecurityAuditRegressionTests {
             taskMD.replaceSubrange(markerRange, with: "[ ]")
         }
         #expect(taskMD == "- [ ] done\r\n- [ ] todo\r\n")
+
+        // Entity-only tight list items must also record non-zero byte ranges
+        let entityListDoc = try MarkdownParser().parse("- **&amp;**\r\n- [ ] &copy;\r\n")
+        guard case .list(let entityList) = entityListDoc.blocks.first, entityList.items.count == 2 else {
+            Issue.record("Expected 2-item entity list")
+            return
+        }
+        #expect(entityList.items[0].id.end > entityList.items[0].id.start)
+        #expect(entityList.items[0].id.start > 0)
+        #expect(entityList.items[1].id.end > entityList.items[1].id.start)
+        #expect(entityList.items[1].id.start > entityList.items[0].id.end)
     }
 }

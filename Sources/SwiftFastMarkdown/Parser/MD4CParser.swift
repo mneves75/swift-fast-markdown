@@ -915,6 +915,9 @@ private final class ParserContext {
 
         case MD_TEXT_ENTITY:
             context.ensureImplicitParagraphIfNeeded()
+            if let range = context.pointerRange(text, size: size) {
+                context.recordRangeOnTopBlock(range)
+            }
             if !context.spanStack.isEmpty {
                 let decoded = context.decodeEntity(text, size: size)
                 context.appendSpan(.text(.string(decoded)))
@@ -922,6 +925,9 @@ private final class ParserContext {
 
         case MD_TEXT_NULLCHAR:
             context.ensureImplicitParagraphIfNeeded()
+            if let range = context.pointerRange(text, size: size) {
+                context.recordRangeOnTopBlock(range)
+            }
             if !context.spanStack.isEmpty {
                 context.appendSpan(.text(.string("\u{FFFD}")))
             }

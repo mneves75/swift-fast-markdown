@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.0] - 2026-11-27
 
-Major performance redesign and comprehensive security hardening release. All 118 tests pass (`72 XCTest + 46 Swift Testing`) and every v1.0 release performance target passes with wide headroom.
+Major performance redesign and comprehensive security hardening release. All 118 tests pass (`72 XCTest + 46 Swift Testing`) and every v1.0 release median performance target passes with wide headroom (with p95 targets passing on an unloaded Apple Silicon host; heavy host CPU contention can cause OS scheduling spikes in p95).
 
 ### Security
 
