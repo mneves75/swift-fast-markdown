@@ -5,7 +5,7 @@ repository. See [AGENTS.md](AGENTS.md) for the tool-agnostic copy.
 
 ## What this is
 
-**SwiftFastMarkdown** — a high-performance, SwiftUI-native Markdown parser and
+**SwiftFastMarkdown** (v1.3.0) — a high-performance, SwiftUI-native Markdown parser and
 renderer for iOS 18+ / macOS 15+. It wraps the vendored [md4c](https://github.com/mity/md4c)
 C parser (CommonMark 0.31 + GFM) and renders to `AttributedString` and SwiftUI
 views, with incremental parsing for streaming (AI chat) and an LRU render cache.
@@ -15,7 +15,7 @@ views, with incremental parsing for streaming (AI chat) and an LRU render cache.
 ```bash
 swift build                 # debug build
 swift build -c release      # release build (default optimizations, no unsafe flags)
-swift test                  # full test suite (must stay green)
+swift test                  # full test suite (118 tests — must stay green)
 swift run -c release SwiftFastMarkdownBenchmarks   # performance benchmarks
 ```
 
@@ -44,23 +44,30 @@ Key design points:
 - **Zero-copy IR**: blocks/spans hold `ByteRange` offsets into the source `Data`;
   strings are decoded lazily via `TextContent.string(in:)`. Don't materialize
   strings during parsing.
-- **Pointer math goes through `MD4CParser.pointerRange`** — it has the bounds
-  checks. `stringFromPointer` reuses it; do not reintroduce inline pointer
+- **Pointer math goes through `MD4CParser.pointerRange`** — it uses unsigned
+  pointer arithmetic and bounds checks. Do not reintroduce inline pointer
   arithmetic.
-- **Byte-range offsetting** for incremental parsing lives in the single
-  `BlockOffsetter` enum. There is no separate "internal" copy — don't fork it.
-- **`IncrementalState` is `@unchecked Sendable`** behind an `NSLock`. Read its
-  state through `snapshot()` only (one lock acquisition, no torn reads).
+- **Incremental byte-range shifting** happens directly in `MD4CParser.parseSlice(..., baseOffset:startingOrdinal:scratch:)`.
+  `MD4CParser.maxInputByteCount` (256 MiB) and `MD4CParser.maxNestingDepth` (64)
+  protect C FFI size bounds and Swift ARC / renderer stack safety.
+- **`IncrementalState` is `@unchecked Sendable`** behind a single `NSLock`
+  protecting every read and mutation (no torn reads). `documentID` rotates on
+  every mutating `append`/`finalize` so downstream caches never serve stale
+  snapshots.
 - **`HighlightrEngine` is an actor** isolating the non-Sendable Highlightr /
-  JavaScriptCore engine. Highlighting is async and runs off the render path.
+  JavaScriptCore engine behind a bounded LRU `HighlightrPool` (max 4 VMs,
+  clearable via `SyntaxHighlightingFactory.clearSharedPool()`). Highlighting
+  validates themes/languages, caps input size (`maxHighlightBytes`), and checks
+  `Task.isCancelled`.
 
 ## Conventions / guardrails
 
 - **Untrusted input.** Markdown is treated as untrusted. Link destinations are
-  validated by `AttributedStringRenderer.safeLinkURL` — only `http`, `https`,
-  `mailto`, `tel`, and relative destinations become links. If you add any new
-  path that turns a destination into a `URL`/`.link`, route it through that
-  helper.
+  validated by `AttributedStringRenderer.safeLinkURL` (public) — only `http`/`https`
+  (with non-empty host), `mailto`/`tel` (with non-empty body), and clean relative
+  destinations become links. Protocol-relative `//host`, whitespace/control-obfuscated
+  schemes, and RFC 3986 §4.2 first-segment colons are blocked. Route any new
+  destination→URL path through that helper.
 - **No `.unsafeFlags` in Package.swift.** SwiftPM refuses to resolve packages
   that use them as remote dependencies, and `-Ounchecked` would disable safety
   checks on untrusted input. Rely on SwiftPM's default release optimization.
@@ -68,8 +75,8 @@ Key design points:
   UTF-8 byte buffer (`SinglePassBuilder`), a prebuilt `StylePalette` of
   `AttributeContainer`s, and POD `RunPatch` spans applied monotonically onto a
   single `AttributedString(fullString, attributes: baseAttributes)`. Keep
-  `safeLinkURL` on all link/wikiLink paths and preserve the malformed-UTF-8
-  slice fallback.
+  `safeLinkURL` on all link/wikiLink paths and preserve per-slice UTF-8 validation
+  so malformed slices cannot splice across delimiters or misalign patch offsets.
 - **Tests are the contract.** When fixing a bug, add a failing test first, then
   fix. Keep `swift test` green before committing.
 

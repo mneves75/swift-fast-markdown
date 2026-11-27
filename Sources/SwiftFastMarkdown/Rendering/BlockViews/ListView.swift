@@ -6,6 +6,7 @@ struct ListView: View {
     let style: MarkdownStyle
     let highlighter: any SyntaxHighlighting
     let onToggleTask: ((ListItemBlock, Bool) -> Void)?
+    var depth: Int = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: CGFloat(style.blockSpacing)) {
@@ -22,7 +23,8 @@ struct ListView: View {
                     source: source,
                     style: style,
                     highlighter: highlighter,
-                    onToggleTask: onToggleTask
+                    onToggleTask: onToggleTask,
+                    depth: depth
                 )
             }
         }
@@ -37,6 +39,7 @@ struct ListItemView: View {
     let style: MarkdownStyle
     let highlighter: any SyntaxHighlighting
     let onToggleTask: ((ListItemBlock, Bool) -> Void)?
+    var depth: Int = 1
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -61,12 +64,13 @@ struct ListItemView: View {
                         source: source,
                         style: style,
                         highlighter: highlighter,
-                        onToggleTask: onToggleTask
+                        onToggleTask: onToggleTask,
+                        depth: depth
                     )
                 }
             }
         }
-        .padding(.leading, CGFloat(style.listIndent) * 4.0)
+        .padding(.leading, CGFloat(min(style.listIndent, 16)) * 4.0)
     }
 
     private var listMarker: String {

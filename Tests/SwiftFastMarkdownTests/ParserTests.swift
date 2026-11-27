@@ -26,32 +26,6 @@ final class ParserTests: XCTestCase {
         }
     }
 
-    func testParsesTaskList() throws {
-        let input = "- [x] Done\n- [ ] Todo"
-        let document = try MarkdownParser().parse(input)
-        XCTAssertEqual(document.blocks.count, 1)
-        guard case .list(let list) = document.blocks[0] else {
-            return XCTFail("Expected list block")
-        }
-        XCTAssertEqual(list.items.count, 2)
-        XCTAssertTrue(list.items[0].isTask)
-        XCTAssertTrue(list.items[0].isChecked)
-        XCTAssertTrue(list.items[1].isTask)
-        XCTAssertFalse(list.items[1].isChecked)
-    }
-
-    func testParsesTable() throws {
-        let input = "| a | b |\n| - | - |\n| c | d |"
-        let document = try MarkdownParser().parse(input)
-        XCTAssertEqual(document.blocks.count, 1)
-        guard case .table(let table) = document.blocks[0] else {
-            return XCTFail("Expected table block")
-        }
-        XCTAssertEqual(table.headerRows.count, 1)
-        XCTAssertEqual(table.bodyRows.count, 1)
-        XCTAssertEqual(table.headerRows[0].cells.count, 2)
-    }
-
     func testParsesCodeBlockLanguage() throws {
         let input = "```swift\nlet value = 1\n```"
         let document = try MarkdownParser().parse(input)

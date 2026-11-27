@@ -3,9 +3,23 @@ import CMD4C
 
 public enum MarkdownParserError: Error {
     case parsingFailed(Int32)
+    /// Input exceeded `MD4CParser.maxInputByteCount` (guards against 32-bit `MD_SIZE`
+    /// narrowing traps and vendored `CMD4C` 32-bit buffer-growth truncation).
+    case inputTooLarge(Int)
 }
 
 public struct MD4CParser: Sendable {
+    /// Maximum accepted Markdown input size in bytes (256 MiB).
+    /// Keeps all `MD_SIZE` conversions and vendored `CMD4C` temporary buffer
+    /// growth arithmetic (`1.5x`) strictly below the 32-bit `UInt32` overflow boundary.
+    public static let maxInputByteCount: Int = 256 * 1024 * 1024
+
+    /// Maximum container and inline-span AST nesting depth preserved during parsing.
+    /// Deeper containers/spans are flattened in place (preserving all leaf text) so
+    /// Swift ARC value-witness destruction, `Equatable`, and renderers cannot overflow
+    /// a 512 KB cooperative thread stack on deeply nested untrusted input.
+    public static let maxNestingDepth: Int = 64
+
     public init() {}
 
     public func parse(_ input: String, options: ParseOptions = .default) throws -> MarkdownDocument {
@@ -79,6 +93,9 @@ public struct MD4CParser: Sendable {
         startingOrdinal: UInt32,
         options: ParseOptions
     ) throws -> (blocks: [MarkdownBlock], lastOrdinal: UInt32) {
+        guard count >= 0, count <= Self.maxInputByteCount, let mdSize = MD_SIZE(exactly: count) else {
+            throw MarkdownParserError.inputTooLarge(count)
+        }
         context.reset(
             basePointer: baseAddress,
             dataCount: count,
@@ -98,7 +115,7 @@ public struct MD4CParser: Sendable {
         parser.debug_log = nil
         parser.syntax = nil
 
-        let result = md_parse(baseAddress, MD_SIZE(count), &parser, Unmanaged.passUnretained(context).toOpaque())
+        let result = md_parse(baseAddress, mdSize, &parser, Unmanaged.passUnretained(context).toOpaque())
         if result != 0 {
             throw MarkdownParserError.parsingFailed(Int32(result))
         }
@@ -146,11 +163,13 @@ private final class ScratchStack<T> {
 
     @inline(__always)
     func replaceLast(_ element: T) {
+        precondition(count > 0, "ScratchStack.replaceLast called on empty stack")
         storage[count - 1] = element
     }
 
     @inline(__always)
     func takeArray(from start: Int) -> [T] {
+        precondition(start >= 0 && start <= count, "ScratchStack.takeArray start out of bounds")
         let n = count - start
         if n <= 0 { return [] }
         let src = storage.advanced(by: start)
@@ -164,6 +183,7 @@ private final class ScratchStack<T> {
 
     @inline(__always)
     func popLast() -> T {
+        precondition(count > 0, "ScratchStack.popLast called on empty stack")
         count -= 1
         return storage.advanced(by: count).move()
     }
@@ -178,7 +198,8 @@ private final class ScratchStack<T> {
 
     @inline(never)
     private func grow() {
-        let newCapacity = capacity << 1
+        let (newCapacity, overflow) = capacity.multipliedReportingOverflow(by: 2)
+        precondition(!overflow && newCapacity > capacity, "ScratchStack capacity overflow")
         let newStorage = UnsafeMutablePointer<T>.allocate(capacity: newCapacity)
         if count > 0 {
             newStorage.moveInitialize(from: storage, count: count)
@@ -195,8 +216,8 @@ private final class ScratchStack<T> {
 /// `ScratchStack` buffers (zero O(n²) copies, zero ARC retain/release churn on
 /// slice extraction, and O(1) incremental byte-range tracking on each frame).
 private final class ParserContext {
-    var basePointer: UnsafePointer<MD_CHAR>!
-    var baseAddressInt: Int = 0
+    var basePointer: UnsafePointer<MD_CHAR>?
+    var baseAddressUInt: UInt = 0
     var dataCount: Int = 0
     var baseOffset: UInt32 = 0
     var ordinal: UInt32 = 0
@@ -205,6 +226,8 @@ private final class ParserContext {
     private var blockStack: [BlockFrame] = []
     private var tableSectionStack: [TableSection] = []
     private var spanStack: [SpanFrame] = []
+    private var skippedContainers: [UInt32] = []
+    private var skippedSpans: [UInt32] = []
 
     // Zero-ARC-copy LIFO child buffers
     private let blockChildren: ScratchStack<MarkdownBlock>
@@ -243,18 +266,23 @@ private final class ParserContext {
         baseOffset: UInt32,
         startingOrdinal: UInt32
     ) {
+        clearTemporaryState()
         self.basePointer = basePointer
-        self.baseAddressInt = Int(bitPattern: basePointer)
+        self.baseAddressUInt = UInt(bitPattern: basePointer)
         self.dataCount = dataCount
         self.baseOffset = baseOffset
         self.ordinal = startingOrdinal
-        clearTemporaryState()
     }
 
     func clearTemporaryState() {
+        basePointer = nil
+        baseAddressUInt = 0
+        dataCount = 0
         blockStack.removeAll(keepingCapacity: true)
         tableSectionStack.removeAll(keepingCapacity: true)
         spanStack.removeAll(keepingCapacity: true)
+        skippedContainers.removeAll(keepingCapacity: true)
+        skippedSpans.removeAll(keepingCapacity: true)
         blockChildren.removeAllKeepingCapacity()
         listItems.removeAllKeepingCapacity()
         tableHeaderRows.removeAllKeepingCapacity()
@@ -282,16 +310,22 @@ private final class ParserContext {
     /// shifted by `baseOffset`. All pointer arithmetic flows through here.
     @inline(__always)
     private func pointerRange(_ text: UnsafePointer<MD_CHAR>?, size: MD_SIZE) -> ByteRange? {
-        guard let text else { return nil }
-        let textAddress = Int(bitPattern: text)
-        guard textAddress >= baseAddressInt else { return nil }
+        guard let text, basePointer != nil else { return nil }
+        let textAddress = UInt(bitPattern: text)
+        guard textAddress >= baseAddressUInt else { return nil }
 
-        let offset = textAddress - baseAddressInt
-        let end = offset + Int(size)
-        guard offset >= 0, end >= offset, end <= dataCount else { return nil }
+        let offsetUInt = textAddress - baseAddressUInt
+        guard offsetUInt <= UInt(dataCount) else { return nil }
+        let offset = Int(offsetUInt)
+        let sizeInt = Int(size)
+        guard sizeInt <= dataCount - offset else { return nil }
+        let end = offset + sizeInt
 
-        let (startWithBase, o1) = UInt32(offset).addingReportingOverflow(baseOffset)
-        let (endWithBase, o2) = UInt32(end).addingReportingOverflow(baseOffset)
+        guard let startU32 = UInt32(exactly: offset), let endU32 = UInt32(exactly: end) else {
+            return nil
+        }
+        let (startWithBase, o1) = startU32.addingReportingOverflow(baseOffset)
+        let (endWithBase, o2) = endU32.addingReportingOverflow(baseOffset)
         guard !o1, !o2 else { return nil }
 
         return ByteRange(start: startWithBase, end: endWithBase)
@@ -386,7 +420,7 @@ private final class ParserContext {
     }
 
     private func decodeEntity(_ text: UnsafePointer<MD_CHAR>?, size: MD_SIZE) -> String {
-        guard let range = pointerRange(text, size: size) else { return "" }
+        guard let basePointer, let range = pointerRange(text, size: size) else { return "" }
         let start = Int(range.start - baseOffset)
         let length = Int(range.end - range.start)
         guard start >= 0, start + length <= dataCount else { return "" }
@@ -412,9 +446,17 @@ private final class ParserContext {
             context.blockStack.append(BlockFrame(kind: .doc, childStart: 0))
 
         case MD_BLOCK_QUOTE:
+            if !context.skippedContainers.isEmpty || context.blockStack.count >= MD4CParser.maxNestingDepth {
+                context.skippedContainers.append(type.rawValue)
+                return 0
+            }
             context.blockStack.append(BlockFrame(kind: .blockQuote, childStart: context.blockChildren.count))
 
         case MD_BLOCK_UL:
+            if !context.skippedContainers.isEmpty || context.blockStack.count >= MD4CParser.maxNestingDepth {
+                context.skippedContainers.append(type.rawValue)
+                return 0
+            }
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_UL_DETAIL.self)
             let isTight = info?.pointee.is_tight != 0
             let mark = info?.pointee.mark ?? MD_CHAR(45)
@@ -424,6 +466,10 @@ private final class ParserContext {
             ))
 
         case MD_BLOCK_OL:
+            if !context.skippedContainers.isEmpty || context.blockStack.count >= MD4CParser.maxNestingDepth {
+                context.skippedContainers.append(type.rawValue)
+                return 0
+            }
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_OL_DETAIL.self)
             let start = Int(info?.pointee.start ?? 1)
             let rawDelimiter = info?.pointee.mark_delimiter ?? MD_CHAR(46)
@@ -434,6 +480,10 @@ private final class ParserContext {
             ))
 
         case MD_BLOCK_LI:
+            if !context.skippedContainers.isEmpty {
+                context.skippedContainers.append(type.rawValue)
+                return 0
+            }
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_LI_DETAIL.self)
             let isTask = info?.pointee.is_task != 0
             let mark = info?.pointee.task_mark
@@ -520,6 +570,10 @@ private final class ParserContext {
 
         switch type {
         case MD_BLOCK_QUOTE:
+            if context.skippedContainers.last == type.rawValue {
+                context.skippedContainers.removeLast()
+                return 0
+            }
             guard let frame = context.blockStack.popLast(), case .blockQuote = frame.kind else { return 0 }
             let blocks = context.blockChildren.takeArray(from: frame.childStart)
             let range = frame.resolvedRange
@@ -528,6 +582,10 @@ private final class ParserContext {
             context.appendBlock(.blockQuote(BlockQuoteBlock(id: id, blocks: blocks)))
 
         case MD_BLOCK_UL, MD_BLOCK_OL:
+            if context.skippedContainers.last == type.rawValue {
+                context.skippedContainers.removeLast()
+                return 0
+            }
             guard let frame = context.blockStack.popLast(),
                   case .list(let ordered, let start, let delimiter, let isTight) = frame.kind else { return 0 }
             let items = context.listItems.takeArray(from: frame.childStart)
@@ -544,6 +602,10 @@ private final class ParserContext {
             )))
 
         case MD_BLOCK_LI:
+            if context.skippedContainers.last == type.rawValue {
+                context.skippedContainers.removeLast()
+                return 0
+            }
             guard let frame = context.blockStack.popLast(),
                   case .listItem(let isTask, let isChecked) = frame.kind else { return 0 }
             let blocks = context.blockChildren.takeArray(from: frame.childStart)
@@ -642,6 +704,11 @@ private final class ParserContext {
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
 
+        if !context.skippedSpans.isEmpty || context.spanStack.count >= MD4CParser.maxNestingDepth {
+            context.skippedSpans.append(type.rawValue)
+            return 0
+        }
+
         let kind: SpanKind
         switch type {
         case MD_SPAN_EM:
@@ -689,9 +756,13 @@ private final class ParserContext {
         return 0
     }
 
-    static let leaveSpanCallback: @convention(c) (MD_SPANTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { _, _, userdata in
+    static let leaveSpanCallback: @convention(c) (MD_SPANTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { type, _, userdata in
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
+        if context.skippedSpans.last == type.rawValue {
+            context.skippedSpans.removeLast()
+            return 0
+        }
         guard let frame = context.spanStack.popLast() else { return 0 }
 
         let children = context.spanChildren.takeArray(from: frame.childStart)
@@ -742,7 +813,7 @@ private final class ParserContext {
                 case .bytes(let r):
                     let start = Int(r.start - baseOffset)
                     let length = Int(r.end - r.start)
-                    if start >= 0, start + length <= dataCount {
+                    if let basePointer, start >= 0, start + length <= dataCount {
                         basePointer.advanced(by: start).withMemoryRebound(to: UInt8.self, capacity: length) { ptr in
                             text += String(decoding: UnsafeBufferPointer(start: ptr, count: length), as: UTF8.self)
                         }
@@ -753,7 +824,7 @@ private final class ParserContext {
                     for r in seq.ranges {
                         let start = Int(r.start - baseOffset)
                         let length = Int(r.end - r.start)
-                        if start >= 0, start + length <= dataCount {
+                        if let basePointer, start >= 0, start + length <= dataCount {
                             basePointer.advanced(by: start).withMemoryRebound(to: UInt8.self, capacity: length) { ptr in
                                 text += String(decoding: UnsafeBufferPointer(start: ptr, count: length), as: UTF8.self)
                             }

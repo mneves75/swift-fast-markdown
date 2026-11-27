@@ -206,7 +206,7 @@ struct AllFeaturesDemo: View {
 
     ---
 
-    *Rendered with SwiftFastMarkdown v1.1.1*
+    *Rendered with SwiftFastMarkdown v1.3.0 (118 tests passing)*
     """
 
     @State private var document: MarkdownDocument?

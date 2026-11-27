@@ -25,7 +25,7 @@ Add SwiftFastMarkdown to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mneves75/swift-fast-markdown.git", from: "1.2.0")
+    .package(url: "https://github.com/mneves75/swift-fast-markdown.git", from: "1.3.0")
 ]
 ```
 
@@ -312,6 +312,12 @@ Implement the `SyntaxHighlighting` protocol for custom highlighting:
 
 ```swift
 public actor CustomHighlighter: SyntaxHighlighting {
+    private var themeName = "default"
+
+    public func setTheme(_ name: String) async {
+        themeName = name
+    }
+
     public func highlight(
         code: String,
         language: String?
@@ -319,13 +325,12 @@ public actor CustomHighlighter: SyntaxHighlighting {
         var result = AttributedString(code)
         result.font = .system(.body, design: .monospaced)
 
-        // Add custom highlighting logic here
-        // For example, simple keyword highlighting:
+        // Add custom highlighting logic here (using `themeName` and `language`)
         if language == "swift" {
-            // Highlight Swift keywords
             let keywords = ["func", "var", "let", "class", "struct"]
             for keyword in keywords {
-                // Apply styling to keywords...
+                // Apply styling to matching keyword ranges...
+                _ = keyword
             }
         }
 
@@ -369,19 +374,22 @@ struct TaskListView: View {
     }
 
     private func updateTaskItem(_ item: ListItemBlock, isChecked: Bool) {
-        // Replace [ ] with [x] or vice versa at the item's position
-        let range = item.range
-        let oldMarker = isChecked ? "[ ]" : "[x]"
-        let newMarker = isChecked ? "[x]" : "[ ]"
+        // Locate the checkbox marker on the line preceding the item's first content byte
+        // (searching UTF-8 bytes so CRLF "\r\n" line endings are handled accurately)
+        let utf8 = markdown.utf8
+        let contentOffset = min(Int(item.id.start), utf8.count)
+        let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
+        let lineStart = utf8[..<contentIndex]
+            .lastIndex(of: 0x0A)
+            .map { utf8.index(after: $0) } ?? markdown.startIndex
 
-        // Update markdown string
-        if let textRange = Range(
-            NSRange(location: Int(range.start), length: Int(range.length)),
-            in: markdown
-        ) {
-            let itemText = String(markdown[textRange])
-            let updated = itemText.replacingOccurrences(of: oldMarker, with: newMarker)
-            markdown.replaceSubrange(textRange, with: updated)
+        let candidates = isChecked ? ["[ ]"] : ["[x]", "[X]"]
+        let replacement = isChecked ? "[x]" : "[ ]"
+
+        if let markerRange = candidates.lazy.compactMap({
+            markdown.range(of: $0, range: lineStart..<contentIndex)
+        }).first {
+            markdown.replaceSubrange(markerRange, with: replacement)
         }
     }
 }
@@ -395,8 +403,9 @@ SwiftFastMarkdown automatically uses iOS 26 Liquid Glass effects when available.
 
 ### Automatic Behavior
 
-- **iOS 26+**: Code blocks, block quotes, and tables use `.glassEffect(.regular)`
-- **iOS 18-25**: Falls back to `.ultraThinMaterial` or `.regularMaterial`
+- **iOS 26+**: Code blocks, block quotes, and tables at view nesting depth `<= 4` use `.glassEffect(.regular)`
+- **iOS 18-25**: Falls back to `.ultraThinMaterial` or `.regularMaterial` at view nesting depth `<= 4`
+- **Depth > 4 (up to view recursion cap of 32)**: Skips stacked glass/material surfaces to prevent GPU offscreen-pass blowup on deeply nested containers
 
 ### Custom Glass Configuration
 
@@ -546,6 +555,14 @@ if let url = AttributedStringRenderer.safeLinkURL(destinationString) {
 The package ships without `.unsafeFlags`, so bounds and overflow checks remain
 enabled in the parser. This also makes it consumable as a remote SwiftPM
 dependency (SwiftPM refuses to resolve packages that use `.unsafeFlags`).
+
+### Input, nesting, and highlighting bounds
+
+- `MD4CParser.maxInputByteCount` (256 MiB) throws `MarkdownParserError.inputTooLarge` before invoking C `md_parse`.
+- `MD4CParser.maxNestingDepth` (64) flattens deeply nested blockquotes, lists, and inline spans while preserving leaf text, keeping Swift ARC destruction and renderers stack-safe on 512 KB cooperative threads.
+- `HighlightrEngine.Configuration.maxHighlightBytes` (default 64 KiB) falls back to plain text on huge code blocks, sets `ignoreIllegals = true` and requires an explicitly allowlisted language (mapping standard aliases like `js`/`ts`/`py`, blocking `livescript`/`ls`, and skipping direct `language: nil` or unknown-language calls; note pinned `Highlightr 2.3.0` / `highlight.js 11.11.1` retains internal sub-language auto-detection for multi-language grammars such as `http` and its own `isUndefined` fallback), and respects `Task.isCancelled`.
+- Call `await SyntaxHighlightingFactory.clearSharedPool()` on logout, account switch, or memory pressure to evict pooled JavaScriptCore VMs and cached code snippets.
+- All 118 unit and security regression tests verify these invariants via `swift test`.
 
 ---
 

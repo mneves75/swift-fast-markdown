@@ -12,13 +12,68 @@ public struct AttributedStringRenderer: Sendable {
     private static let defaultPalette = StylePalette(style: .default)
 
     /// Returns a URL only when the destination is safe to attach as a link.
-    /// Scheme-less (relative) destinations are allowed.
-    /// Markdown often comes from untrusted sources (LLM output, user input);
-    /// anything else — javascript:, data:, file:, etc. — is rendered as plain text.
-    static func safeLinkURL(_ destination: String) -> URL? {
+    /// Relative paths/fragments/queries without a scheme are allowed, while
+    /// protocol-relative URLs (`//host`), whitespace/control-obfuscated schemes,
+    /// RFC 3986 §4.2 first-segment colons, host-less `http:`/`https:`, and
+    /// non-allowlisted schemes (`javascript:`, `data:`, `file:`, etc.) are blocked.
+    public static func safeLinkURL(_ destination: String) -> URL? {
+        guard !destination.isEmpty else { return nil }
+
+        // Reject any ASCII whitespace (<= 0x20) or C0/DEL control bytes before
+        // Foundation URL(string:) can percent-encode them into a scheme-less URL.
+        var copy = destination
+        let hasForbiddenOrSchemeIssue: Bool = copy.withUTF8 { buf in
+            guard !buf.isEmpty else { return true }
+            // Reject protocol-relative authority URLs ("//host/...")
+            if buf.count >= 2 && buf[0] == 0x2F && buf[1] == 0x2F {
+                return true
+            }
+            for i in 0..<buf.count {
+                let b = buf[i]
+                if b <= 0x20 || b == 0x7F {
+                    return true
+                }
+            }
+            return false
+        }
+        guard !hasForbiddenOrSchemeIssue else { return nil }
+
         guard let url = URL(string: destination) else { return nil }
-        guard let scheme = url.scheme else { return url }
-        return isAllowedScheme(scheme) ? url : nil
+
+        if let scheme = url.scheme {
+            guard isAllowedScheme(scheme) else { return nil }
+            // Require a non-empty host for http/https and non-empty resource for mailto/tel
+            var lowerScheme = scheme
+            let needsHost: Bool = lowerScheme.withUTF8 { buf in
+                buf.count == 4 || buf.count == 5 // http or https
+            }
+            if needsHost {
+                guard let host = url.host, !host.isEmpty else { return nil }
+            } else {
+                // mailto: or tel: must have content after the scheme colon
+                let afterColonCount = destination.utf8.count - scheme.utf8.count - 1
+                guard afterColonCount > 0 else { return nil }
+            }
+            return url
+        }
+
+        // Scheme-less (relative) URL: reject any host (protocol-relative) and
+        // reject a colon before the first '/', '?', or '#' (RFC 3986 §4.2) so
+        // invalid-scheme-character strings like "custom_scheme://action" cannot sneak through.
+        if let host = url.host, !host.isEmpty {
+            return nil
+        }
+        let hasLeadingColon: Bool = copy.withUTF8 { buf in
+            for i in 0..<buf.count {
+                let b = buf[i]
+                if b == 0x3A { return true } // ':'
+                if b == 0x2F || b == 0x3F || b == 0x23 { return false } // '/', '?', '#'
+            }
+            return false
+        }
+        guard !hasLeadingColon else { return nil }
+
+        return url
     }
 
     @inline(__always)
@@ -207,6 +262,9 @@ private struct RunPatch {
 }
 
 private struct SinglePassBuilder {
+    private static let maxNestingDepth = 64
+    private static let maxIndentSpaces = 64
+
     let rawSource: UnsafeRawBufferPointer
     let style: MarkdownStyle
     let palette: StylePalette
@@ -215,7 +273,6 @@ private struct SinglePassBuilder {
     private var utf8Bytes: [UInt8]
     private var patches: [RunPatch]
     private var customContainers: [AttributeContainer] = []
-    private var hasUntrustedNonASCII: Bool = false
 
     init(
         rawSource: UnsafeRawBufferPointer,
@@ -238,35 +295,41 @@ private struct SinglePassBuilder {
         let blockCount = blocks.count
         let newlineCount = max(1, style.blockSpacing)
         for index in 0..<blockCount {
-            emitBlock(blocks[index], indentLevel: 0)
+            emitBlock(blocks[index], indentLevel: 0, depth: 0)
             if index < blockCount - 1 {
                 appendRepeatedASCII(0x0A, count: newlineCount)
             }
         }
     }
 
-    private mutating func emitBlock(_ block: MarkdownBlock, indentLevel: Int) {
+    private mutating func emitBlock(_ block: MarkdownBlock, indentLevel: Int, depth: Int) {
+        if depth >= Self.maxNestingDepth {
+            emitBlockIteratively(block, indentLevel: indentLevel)
+            return
+        }
+        let clampedIndent = min(indentLevel, Self.maxIndentSpaces)
+        let indentStep = max(0, style.listIndent)
         switch block {
         case .paragraph(let paragraph):
-            if indentLevel > 0 {
-                appendRepeatedASCII(0x20, count: indentLevel)
+            if clampedIndent > 0 {
+                appendRepeatedASCII(0x20, count: clampedIndent)
             }
-            emitSpans(paragraph.spans, styleTag: .base, currentAttrs: baseAttributes)
+            emitSpans(paragraph.spans, styleTag: .base, currentAttrs: baseAttributes, depth: 0)
 
         case .heading(let heading):
-            if indentLevel > 0 {
-                appendRepeatedASCII(0x20, count: indentLevel)
+            if clampedIndent > 0 {
+                appendRepeatedASCII(0x20, count: clampedIndent)
             }
             if palette.headings.isEmpty {
-                emitSpans(heading.spans, styleTag: .base, currentAttrs: baseAttributes)
+                emitSpans(heading.spans, styleTag: .base, currentAttrs: baseAttributes, depth: 0)
             } else {
                 let idx = max(0, min(heading.level - 1, palette.headings.count - 1))
-                emitSpans(heading.spans, styleTag: .heading(idx), currentAttrs: palette.headings[idx])
+                emitSpans(heading.spans, styleTag: .heading(idx), currentAttrs: palette.headings[idx], depth: 0)
             }
 
         case .codeBlock(let codeBlock):
-            if indentLevel > 0 {
-                appendRepeatedASCII(0x20, count: indentLevel)
+            if clampedIndent > 0 {
+                appendRepeatedASCII(0x20, count: clampedIndent)
             }
             let start = utf8Bytes.count
             appendTextContent(codeBlock.content)
@@ -275,13 +338,13 @@ private struct SinglePassBuilder {
         case .blockQuote(let quote):
             let blocks = quote.blocks
             let count = blocks.count
-            let nextIndent = indentLevel + style.listIndent
+            let nextIndent = min(Self.maxIndentSpaces, clampedIndent + indentStep)
             for index in 0..<count {
-                if indentLevel > 0 {
-                    appendRepeatedASCII(0x20, count: indentLevel)
+                if clampedIndent > 0 {
+                    appendRepeatedASCII(0x20, count: clampedIndent)
                 }
                 appendBytes(AttributedStringRenderer.blockQuotePrefixUTF8)
-                emitBlock(blocks[index], indentLevel: nextIndent)
+                emitBlock(blocks[index], indentLevel: nextIndent, depth: depth + 1)
                 if index < count - 1 {
                     utf8Bytes.append(0x0A)
                 }
@@ -292,13 +355,13 @@ private struct SinglePassBuilder {
             let count = items.count
             let ordered = list.ordered
             let startNum = list.start
-            let nextIndent = indentLevel + style.listIndent
+            let nextIndent = min(Self.maxIndentSpaces, clampedIndent + indentStep)
             for index in 0..<count {
-                if indentLevel > 0 {
-                    appendRepeatedASCII(0x20, count: indentLevel)
+                if clampedIndent > 0 {
+                    appendRepeatedASCII(0x20, count: clampedIndent)
                 }
                 if ordered {
-                    appendDecimalInt(startNum + index)
+                    appendDecimalInt(startNum &+ index)
                     utf8Bytes.append(0x2E) // '.'
                     utf8Bytes.append(0x20) // ' '
                 } else {
@@ -307,7 +370,7 @@ private struct SinglePassBuilder {
                 let itemBlocks = items[index].blocks
                 let blockCount = itemBlocks.count
                 for blockIndex in 0..<blockCount {
-                    emitBlock(itemBlocks[blockIndex], indentLevel: nextIndent)
+                    emitBlock(itemBlocks[blockIndex], indentLevel: nextIndent, depth: depth + 1)
                     if blockIndex < blockCount - 1 {
                         utf8Bytes.append(0x0A)
                     }
@@ -322,14 +385,14 @@ private struct SinglePassBuilder {
             guard totalRows > 0 else { return }
             var rowCounter = 0
             for row in table.headerRows {
-                emitTableRow(row, indentLevel: indentLevel)
+                emitTableRow(row, indentLevel: clampedIndent)
                 rowCounter += 1
                 if rowCounter < totalRows {
                     utf8Bytes.append(0x0A)
                 }
             }
             for row in table.bodyRows {
-                emitTableRow(row, indentLevel: indentLevel)
+                emitTableRow(row, indentLevel: clampedIndent)
                 rowCounter += 1
                 if rowCounter < totalRows {
                     utf8Bytes.append(0x0A)
@@ -340,10 +403,64 @@ private struct SinglePassBuilder {
             appendBytes(AttributedStringRenderer.thematicBreakUTF8)
 
         case .htmlBlock(let html):
-            if indentLevel > 0 {
-                appendRepeatedASCII(0x20, count: indentLevel)
+            if clampedIndent > 0 {
+                appendRepeatedASCII(0x20, count: clampedIndent)
             }
             appendTextContent(html.content)
+        }
+    }
+
+    /// Heap-backed iterative fallback beyond `maxNestingDepth`, guaranteeing O(1)
+    /// call-stack depth on arbitrarily nested untrusted Markdown trees.
+    @inline(never)
+    private mutating func emitBlockIteratively(_ root: MarkdownBlock, indentLevel: Int) {
+        let clampedIndent = min(indentLevel, Self.maxIndentSpaces)
+        var worklist: [MarkdownBlock] = [root]
+        var emittedLeaf = false
+        while let current = worklist.popLast() {
+            switch current {
+            case .blockQuote(let quote):
+                for child in quote.blocks.reversed() {
+                    worklist.append(child)
+                }
+            case .list(let list):
+                for item in list.items.reversed() {
+                    for child in item.blocks.reversed() {
+                        worklist.append(child)
+                    }
+                }
+            case .paragraph(let paragraph):
+                if emittedLeaf { utf8Bytes.append(0x0A) }
+                if clampedIndent > 0 { appendRepeatedASCII(0x20, count: clampedIndent) }
+                emitSpans(paragraph.spans, styleTag: .base, currentAttrs: baseAttributes, depth: 0)
+                emittedLeaf = true
+            case .heading(let heading):
+                if emittedLeaf { utf8Bytes.append(0x0A) }
+                if clampedIndent > 0 { appendRepeatedASCII(0x20, count: clampedIndent) }
+                emitSpans(heading.spans, styleTag: .base, currentAttrs: baseAttributes, depth: 0)
+                emittedLeaf = true
+            case .codeBlock(let codeBlock):
+                if emittedLeaf { utf8Bytes.append(0x0A) }
+                if clampedIndent > 0 { appendRepeatedASCII(0x20, count: clampedIndent) }
+                let start = utf8Bytes.count
+                appendTextContent(codeBlock.content)
+                recordPatch(start: start, end: utf8Bytes.count, style: .code)
+                emittedLeaf = true
+            case .table(let table):
+                if emittedLeaf { utf8Bytes.append(0x0A) }
+                for row in table.headerRows { emitTableRow(row, indentLevel: clampedIndent); utf8Bytes.append(0x0A) }
+                for row in table.bodyRows { emitTableRow(row, indentLevel: clampedIndent); utf8Bytes.append(0x0A) }
+                emittedLeaf = true
+            case .thematicBreak:
+                if emittedLeaf { utf8Bytes.append(0x0A) }
+                appendBytes(AttributedStringRenderer.thematicBreakUTF8)
+                emittedLeaf = true
+            case .htmlBlock(let html):
+                if emittedLeaf { utf8Bytes.append(0x0A) }
+                if clampedIndent > 0 { appendRepeatedASCII(0x20, count: clampedIndent) }
+                appendTextContent(html.content)
+                emittedLeaf = true
+            }
         }
     }
 
@@ -355,20 +472,108 @@ private struct SinglePassBuilder {
         let cells = row.cells
         let cellCount = cells.count
         for cellIndex in 0..<cellCount {
-            emitSpans(cells[cellIndex].spans, styleTag: .base, currentAttrs: baseAttributes)
+            emitSpans(cells[cellIndex].spans, styleTag: .base, currentAttrs: baseAttributes, depth: 0)
             if cellIndex < cellCount - 1 {
                 appendBytes(AttributedStringRenderer.cellSeparatorUTF8)
             }
         }
     }
 
-    mutating func emitSpans(_ spans: [MarkdownSpan], styleTag: PatchStyle, currentAttrs: AttributeContainer) {
+    mutating func emitSpans(_ spans: [MarkdownSpan], styleTag: PatchStyle, currentAttrs: AttributeContainer, depth: Int = 0) {
+        if depth >= Self.maxNestingDepth {
+            emitSpansIteratively(spans, styleTag: styleTag, currentAttrs: currentAttrs)
+            return
+        }
         for span in spans {
-            emitSpan(span, styleTag: styleTag, currentAttrs: currentAttrs)
+            emitSpan(span, styleTag: styleTag, currentAttrs: currentAttrs, depth: depth)
         }
     }
 
-    private mutating func emitSpan(_ span: MarkdownSpan, styleTag: PatchStyle, currentAttrs: AttributeContainer) {
+    @inline(never)
+    private mutating func emitSpansIteratively(_ spans: [MarkdownSpan], styleTag: PatchStyle, currentAttrs: AttributeContainer) {
+        var stack: [(span: MarkdownSpan, tag: PatchStyle, attrs: AttributeContainer)] = []
+        stack.reserveCapacity(spans.count)
+        for span in spans.reversed() {
+            stack.append((span, styleTag, currentAttrs))
+        }
+        while let entry = stack.popLast() {
+            let tag = entry.tag
+            let attrs = entry.attrs
+            switch entry.span {
+            case .text(let content), .html(let content):
+                let start = utf8Bytes.count
+                appendTextContent(content)
+                if tag != .base { recordPatch(start: start, end: utf8Bytes.count, style: tag) }
+            case .code(let content):
+                let start = utf8Bytes.count
+                appendTextContent(content)
+                recordPatch(start: start, end: utf8Bytes.count, style: .code)
+            case .latexInline(let content), .latexDisplay(let content):
+                let start = utf8Bytes.count
+                appendTextContent(content)
+                recordPatch(start: start, end: utf8Bytes.count, style: .latex)
+            case .lineBreak:
+                let start = utf8Bytes.count
+                utf8Bytes.append(0x0A)
+                if tag != .base { recordPatch(start: start, end: utf8Bytes.count, style: tag) }
+            case .softBreak:
+                let start = utf8Bytes.count
+                utf8Bytes.append(0x20)
+                if tag != .base { recordPatch(start: start, end: utf8Bytes.count, style: tag) }
+            case .link(let children, let destination, _):
+                let nextTag: PatchStyle
+                let nextAttrs: AttributeContainer
+                if let destination, let url = AttributedStringRenderer.safeLinkURL(destination.string(in: rawSource)) {
+                    var derived = (tag == .base) ? palette.linkBase : attrs
+                    if tag != .base { derived.foregroundColor = style.linkColor }
+                    derived.link = url
+                    nextTag = .custom(registerCustom(derived))
+                    nextAttrs = derived
+                } else if attrs.link != nil || attrs.foregroundColor == style.linkColor {
+                    var derived = attrs
+                    derived.link = nil
+                    derived.foregroundColor = style.textColor
+                    nextTag = .custom(registerCustom(derived))
+                    nextAttrs = derived
+                } else {
+                    nextTag = tag
+                    nextAttrs = attrs
+                }
+                for child in children.reversed() {
+                    stack.append((child, nextTag, nextAttrs))
+                }
+            case .wikiLink(let target, let children):
+                let nextTag: PatchStyle
+                let nextAttrs: AttributeContainer
+                if let url = AttributedStringRenderer.safeLinkURL(target.string(in: rawSource)) {
+                    var derived = (tag == .base) ? palette.linkBase : attrs
+                    if tag != .base { derived.foregroundColor = style.linkColor }
+                    derived.link = url
+                    nextTag = .custom(registerCustom(derived))
+                    nextAttrs = derived
+                } else if attrs.link != nil || attrs.foregroundColor == style.linkColor {
+                    var derived = attrs
+                    derived.link = nil
+                    derived.foregroundColor = style.textColor
+                    nextTag = .custom(registerCustom(derived))
+                    nextAttrs = derived
+                } else {
+                    nextTag = tag
+                    nextAttrs = attrs
+                }
+                for child in children.reversed() {
+                    stack.append((child, nextTag, nextAttrs))
+                }
+            case .emphasis(let children), .strong(let children), .strikethrough(let children), .underline(let children),
+                 .image(let children, _, _):
+                for child in children.reversed() {
+                    stack.append((child, tag, attrs))
+                }
+            }
+        }
+    }
+
+    private mutating func emitSpan(_ span: MarkdownSpan, styleTag: PatchStyle, currentAttrs: AttributeContainer, depth: Int) {
         switch span {
         case .text(let content):
             let start = utf8Bytes.count
@@ -379,42 +584,42 @@ private struct SinglePassBuilder {
 
         case .emphasis(let children):
             if styleTag == .base {
-                emitSpans(children, styleTag: .emphasis, currentAttrs: palette.emphasis)
+                emitSpans(children, styleTag: .emphasis, currentAttrs: palette.emphasis, depth: depth + 1)
             } else {
                 var derived = currentAttrs
                 derived.inlinePresentationIntent = (derived.inlinePresentationIntent ?? []).union(.emphasized)
                 let idx = registerCustom(derived)
-                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
             }
 
         case .strong(let children):
             if styleTag == .base {
-                emitSpans(children, styleTag: .strong, currentAttrs: palette.strong)
+                emitSpans(children, styleTag: .strong, currentAttrs: palette.strong, depth: depth + 1)
             } else {
                 var derived = currentAttrs
                 derived.inlinePresentationIntent = (derived.inlinePresentationIntent ?? []).union(.stronglyEmphasized)
                 let idx = registerCustom(derived)
-                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
             }
 
         case .strikethrough(let children):
             if styleTag == .base {
-                emitSpans(children, styleTag: .strikethrough, currentAttrs: palette.strikethrough)
+                emitSpans(children, styleTag: .strikethrough, currentAttrs: palette.strikethrough, depth: depth + 1)
             } else {
                 var derived = currentAttrs
                 derived.strikethroughStyle = .single
                 let idx = registerCustom(derived)
-                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
             }
 
         case .underline(let children):
             if styleTag == .base {
-                emitSpans(children, styleTag: .underline, currentAttrs: palette.underline)
+                emitSpans(children, styleTag: .underline, currentAttrs: palette.underline, depth: depth + 1)
             } else {
                 var derived = currentAttrs
                 derived.underlineStyle = .single
                 let idx = registerCustom(derived)
-                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
             }
 
         case .code(let content):
@@ -423,18 +628,26 @@ private struct SinglePassBuilder {
             recordPatch(start: start, end: utf8Bytes.count, style: .code)
 
         case .link(let children, let destination, _):
-            var derived = (styleTag == .base) ? palette.linkBase : currentAttrs
-            if styleTag != .base {
-                derived.foregroundColor = style.linkColor
-            }
             if let destination, let url = AttributedStringRenderer.safeLinkURL(destination.string(in: rawSource)) {
+                var derived = (styleTag == .base) ? palette.linkBase : currentAttrs
+                if styleTag != .base {
+                    derived.foregroundColor = style.linkColor
+                }
                 derived.link = url
+                let idx = registerCustom(derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
+            } else if currentAttrs.link != nil || currentAttrs.foregroundColor == style.linkColor {
+                var derived = currentAttrs
+                derived.link = nil
+                derived.foregroundColor = style.textColor
+                let idx = registerCustom(derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
+            } else {
+                emitSpans(children, styleTag: styleTag, currentAttrs: currentAttrs, depth: depth + 1)
             }
-            let idx = registerCustom(derived)
-            emitSpans(children, styleTag: .custom(idx), currentAttrs: derived)
 
         case .image(let alt, _, _):
-            emitSpans(alt, styleTag: styleTag, currentAttrs: currentAttrs)
+            emitSpans(alt, styleTag: styleTag, currentAttrs: currentAttrs, depth: depth + 1)
 
         case .lineBreak:
             let start = utf8Bytes.count
@@ -458,15 +671,23 @@ private struct SinglePassBuilder {
             }
 
         case .wikiLink(let target, let children):
-            var derived = (styleTag == .base) ? palette.linkBase : currentAttrs
-            if styleTag != .base {
-                derived.foregroundColor = style.linkColor
-            }
             if let url = AttributedStringRenderer.safeLinkURL(target.string(in: rawSource)) {
+                var derived = (styleTag == .base) ? palette.linkBase : currentAttrs
+                if styleTag != .base {
+                    derived.foregroundColor = style.linkColor
+                }
                 derived.link = url
+                let idx = registerCustom(derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
+            } else if currentAttrs.link != nil || currentAttrs.foregroundColor == style.linkColor {
+                var derived = currentAttrs
+                derived.link = nil
+                derived.foregroundColor = style.textColor
+                let idx = registerCustom(derived)
+                emitSpans(children, styleTag: .custom(idx), currentAttrs: derived, depth: depth + 1)
+            } else {
+                emitSpans(children, styleTag: styleTag, currentAttrs: currentAttrs, depth: depth + 1)
             }
-            let idx = registerCustom(derived)
-            emitSpans(children, styleTag: .custom(idx), currentAttrs: derived)
 
         case .latexInline(let content), .latexDisplay(let content):
             let start = utf8Bytes.count
@@ -547,24 +768,41 @@ private struct SinglePassBuilder {
         guard safe.start < safe.end, let base = rawSource.baseAddress else { return }
         let start = Int(safe.start)
         let len = Int(safe.end - safe.start)
+        let slice = rawSource[start..<(start + len)]
         let ptr = base.advanced(by: start).assumingMemoryBound(to: UInt8.self)
-        utf8Bytes.append(contentsOf: UnsafeBufferPointer(start: ptr, count: len))
-        if !hasUntrustedNonASCII {
-            var i = 0
-            while i + 8 <= len {
-                let word = UnsafeRawPointer(ptr + i).loadUnaligned(as: UInt64.self)
-                if (word & 0x8080_8080_8080_8080) != 0 {
-                    hasUntrustedNonASCII = true
-                    return
-                }
-                i += 8
+
+        // Fast 8-byte SWAR scan for pure ASCII (zero validation cost on the common case).
+        var isASCII = true
+        var i = 0
+        while i + 8 <= len {
+            let word = UnsafeRawPointer(ptr + i).loadUnaligned(as: UInt64.self)
+            if (word & 0x8080_8080_8080_8080) != 0 {
+                isASCII = false
+                break
             }
+            i += 8
+        }
+        if isASCII {
             while i < len {
                 if (ptr[i] & 0x80) != 0 {
-                    hasUntrustedNonASCII = true
-                    return
+                    isASCII = false
+                    break
                 }
                 i += 1
+            }
+        }
+
+        // Validate non-ASCII slices individually so malformed UTF-8 halves
+        // separated by stripped Markdown delimiters can never splice into a
+        // forged Unicode scalar or leave RunPatch offsets mid-scalar.
+        if isASCII || Self.isValidUTF8(ptr, count: len) {
+            utf8Bytes.append(contentsOf: slice)
+        } else {
+            var sanitized = String(decoding: slice, as: UTF8.self)
+            sanitized.withUTF8 { buf in
+                if !buf.isEmpty {
+                    utf8Bytes.append(contentsOf: buf)
+                }
             }
         }
     }
@@ -588,11 +826,10 @@ private struct SinglePassBuilder {
             utf8Bytes.append(0x30 &+ UInt8(value))
             return
         }
-        var n = value
-        if n < 0 {
+        if value < 0 {
             utf8Bytes.append(0x2D)
-            n = -n
         }
+        var n: UInt = value.magnitude
         var digits: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
                      UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) =
             (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -614,98 +851,73 @@ private struct SinglePassBuilder {
     func finalize() -> AttributedString {
         guard !utf8Bytes.isEmpty else { return AttributedString() }
 
-        let offsetsExact = !hasUntrustedNonASCII || Self.isValidUTF8(utf8Bytes)
+        // Every slice appended into utf8Bytes is guaranteed valid UTF-8 on
+        // Unicode scalar boundaries, so RunPatch offsets align 1:1 with utf8 indices.
+        let fullString = String(decoding: utf8Bytes, as: UTF8.self)
+        var result = AttributedString(fullString, attributes: baseAttributes)
+        guard !patches.isEmpty else { return result }
 
-        if offsetsExact {
-            let fullString = String(decoding: utf8Bytes, as: UTF8.self)
-            var result = AttributedString(fullString, attributes: baseAttributes)
-            guard !patches.isEmpty else { return result }
+        if #available(iOS 26, macOS 26, *) {
+            var cursor = result.startIndex
+            var cursorByte = 0
 
-            if #available(iOS 26, macOS 26, *) {
-                var cursor = result.startIndex
-                var cursorByte = 0
-
-                for patch in patches {
-                    let startDelta = patch.startByte - cursorByte
-                    let startIdx = startDelta == 0 ? cursor : result.utf8.index(cursor, offsetBy: startDelta)
-                    let endIdx = result.utf8.index(startIdx, offsetBy: patch.endByte - patch.startByte)
-                    result[startIdx..<endIdx].setAttributes(resolveAttributes(for: patch.style))
-                    cursor = endIdx
-                    cursorByte = patch.endByte
-                }
-            } else {
-                var strCursor = fullString.utf8.startIndex
-                var cursorByte = 0
-
-                for patch in patches {
-                    let startDelta = patch.startByte - cursorByte
-                    let strStart = startDelta == 0 ? strCursor : fullString.utf8.index(strCursor, offsetBy: startDelta)
-                    let strEnd = fullString.utf8.index(strStart, offsetBy: patch.endByte - patch.startByte)
-                    if let startIdx = AttributedString.Index(strStart, within: result),
-                       let endIdx = AttributedString.Index(strEnd, within: result) {
-                        result[startIdx..<endIdx].setAttributes(resolveAttributes(for: patch.style))
-                    }
-                    strCursor = strEnd
-                    cursorByte = patch.endByte
-                }
-            }
-            return result
-        }
-
-        // Safe fallback for malformed UTF-8 inputs where replacement U+FFFD
-        // characters alter byte lengths: decode slice-by-slice.
-        var result = AttributedString()
-        var pos = 0
-        utf8Bytes.withUnsafeBufferPointer { buf in
             for patch in patches {
-                if patch.startByte > pos {
-                    let s = String(decoding: buf[pos..<patch.startByte], as: UTF8.self)
-                    result.append(AttributedString(s, attributes: baseAttributes))
-                }
-                let s = String(decoding: buf[patch.startByte..<patch.endByte], as: UTF8.self)
-                result.append(AttributedString(s, attributes: resolveAttributes(for: patch.style)))
-                pos = patch.endByte
+                let startDelta = patch.startByte - cursorByte
+                let startIdx = startDelta == 0 ? cursor : result.utf8.index(cursor, offsetBy: startDelta)
+                let endIdx = result.utf8.index(startIdx, offsetBy: patch.endByte - patch.startByte)
+                result[startIdx..<endIdx].setAttributes(resolveAttributes(for: patch.style))
+                cursor = endIdx
+                cursorByte = patch.endByte
             }
-            if pos < buf.count {
-                let s = String(decoding: buf[pos..<buf.count], as: UTF8.self)
-                result.append(AttributedString(s, attributes: baseAttributes))
+        } else {
+            var strCursor = fullString.utf8.startIndex
+            var cursorByte = 0
+
+            for patch in patches {
+                let startDelta = patch.startByte - cursorByte
+                let strStart = startDelta == 0 ? strCursor : fullString.utf8.index(strCursor, offsetBy: startDelta)
+                let strEnd = fullString.utf8.index(strStart, offsetBy: patch.endByte - patch.startByte)
+                if let startIdx = AttributedString.Index(strStart, within: result),
+                   let endIdx = AttributedString.Index(strEnd, within: result) {
+                    result[startIdx..<endIdx].setAttributes(resolveAttributes(for: patch.style))
+                }
+                strCursor = strEnd
+                cursorByte = patch.endByte
             }
         }
         return result
     }
 
-    private static func isValidUTF8(_ bytes: [UInt8]) -> Bool {
-        bytes.withUnsafeBufferPointer { buf in
-            var i = 0
-            let n = buf.count
-            while i < n {
-                let b0 = buf[i]
-                if b0 < 0x80 {
-                    i += 1
-                    continue
-                }
-                if b0 >= 0xC2 && b0 <= 0xDF {
-                    guard i + 1 < n, (buf[i + 1] & 0xC0) == 0x80 else { return false }
-                    i += 2
-                } else if b0 >= 0xE0 && b0 <= 0xEF {
-                    guard i + 2 < n else { return false }
-                    let b1 = buf[i + 1], b2 = buf[i + 2]
-                    guard (b1 & 0xC0) == 0x80, (b2 & 0xC0) == 0x80 else { return false }
-                    if b0 == 0xE0 && b1 < 0xA0 { return false }
-                    if b0 == 0xED && b1 >= 0xA0 { return false }
-                    i += 3
-                } else if b0 >= 0xF0 && b0 <= 0xF4 {
-                    guard i + 3 < n else { return false }
-                    let b1 = buf[i + 1], b2 = buf[i + 2], b3 = buf[i + 3]
-                    guard (b1 & 0xC0) == 0x80, (b2 & 0xC0) == 0x80, (b3 & 0xC0) == 0x80 else { return false }
-                    if b0 == 0xF0 && b1 < 0x90 { return false }
-                    if b0 == 0xF4 && b1 >= 0x90 { return false }
-                    i += 4
-                } else {
-                    return false
-                }
+    @inline(__always)
+    private static func isValidUTF8(_ buf: UnsafePointer<UInt8>, count n: Int) -> Bool {
+        var i = 0
+        while i < n {
+            let b0 = buf[i]
+            if b0 < 0x80 {
+                i += 1
+                continue
             }
-            return true
+            if b0 >= 0xC2 && b0 <= 0xDF {
+                guard i + 1 < n, (buf[i + 1] & 0xC0) == 0x80 else { return false }
+                i += 2
+            } else if b0 >= 0xE0 && b0 <= 0xEF {
+                guard i + 2 < n else { return false }
+                let b1 = buf[i + 1], b2 = buf[i + 2]
+                guard (b1 & 0xC0) == 0x80, (b2 & 0xC0) == 0x80 else { return false }
+                if b0 == 0xE0 && b1 < 0xA0 { return false }
+                if b0 == 0xED && b1 >= 0xA0 { return false }
+                i += 3
+            } else if b0 >= 0xF0 && b0 <= 0xF4 {
+                guard i + 3 < n else { return false }
+                let b1 = buf[i + 1], b2 = buf[i + 2], b3 = buf[i + 3]
+                guard (b1 & 0xC0) == 0x80, (b2 & 0xC0) == 0x80, (b3 & 0xC0) == 0x80 else { return false }
+                if b0 == 0xF0 && b1 < 0x90 { return false }
+                if b0 == 0xF4 && b1 >= 0x90 { return false }
+                i += 4
+            } else {
+                return false
+            }
         }
+        return true
     }
 }

@@ -17,6 +17,8 @@ public struct StreamingMarkdownView: View {
     @State private var parser = IncrementalMarkdownParser()
     @State private var document = MarkdownDocument(blocks: [], sourceData: Data())
     @State private var initialized = false
+    @State private var parserFinalized = false
+    @State private var lastParsedContent = ""
 
     public init(
         content: Binding<String>,
@@ -39,19 +41,23 @@ public struct StreamingMarkdownView: View {
                     initialized = true
                     if !content.isEmpty {
                         document = parser.append(content)
+                        lastParsedContent = content
                         if !isStreaming {
                             document = parser.finalize()
+                            parserFinalized = true
                         }
                     }
                 }
             }
-            .onChange(of: content) { oldValue, newValue in
+            .onChange(of: content) { _, newValue in
+                let prior = initialized ? lastParsedContent : ""
                 initialized = true
-                updateDocument(from: oldValue, to: newValue)
+                updateDocument(from: prior, to: newValue)
             }
             .onChange(of: isStreaming) { _, streaming in
-                if !streaming && initialized {
+                if !streaming && initialized && !parserFinalized {
                     document = parser.finalize()
+                    parserFinalized = true
                 }
             }
     }
@@ -93,19 +99,27 @@ public struct StreamingMarkdownView: View {
     private func updateDocument(from oldValue: String, to newValue: String) {
         if newValue.isEmpty {
             parser.reset()
+            parserFinalized = false
+            lastParsedContent = ""
             document = MarkdownDocument(blocks: [], sourceData: Data())
-        } else if let suffix = Self.fastUTF8Suffix(of: newValue, afterPrefix: oldValue) {
+            return
+        }
+
+        if !parserFinalized, let suffix = Self.fastUTF8Suffix(of: newValue, afterPrefix: oldValue) {
             // Fast incremental append via SIMD memcmp + O(1) UTF-8 byte index
             // instead of O(n) Unicode-normalized String.hasPrefix + dropFirst.
             document = parser.append(suffix)
         } else {
-            // Content changed non-incrementally - full reparse
+            // Content changed non-incrementally or arrived after finalize() - full reparse
             parser.reset()
+            parserFinalized = false
             document = parser.append(newValue)
         }
+        lastParsedContent = newValue
 
         if !isStreaming {
             document = parser.finalize()
+            parserFinalized = true
         }
     }
 

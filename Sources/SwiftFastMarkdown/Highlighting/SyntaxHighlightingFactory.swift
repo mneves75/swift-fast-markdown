@@ -14,32 +14,79 @@ public enum SyntaxHighlightingFactory {
     ) -> any SyntaxHighlighting {
         LazySharedHighlighter(configuration: configuration)
     }
+
+    /// Evicts all pooled JavaScriptCore `HighlightrEngine` instances and their
+    /// cached syntax-highlighted code blocks (useful on account switch, logout,
+    /// or memory pressure).
+    public static func clearSharedPool() async {
+        await HighlightrPool.shared.clear()
+    }
 }
 
-/// Process-wide pool of `HighlightrEngine` instances keyed by configuration,
-/// so all views sharing a theme/font share one JavaScriptCore VM and one LRU
-/// highlight cache without booting JSC until a code block is actually highlighted.
+/// Bounded process-wide LRU pool of `HighlightrEngine` instances keyed by
+/// validated configuration (max 4 VMs), so views sharing a theme/font share one
+/// JavaScriptCore VM while preventing unbounded VM/memory growth.
 private actor HighlightrPool {
     static let shared = HighlightrPool()
+    private static let maxPooledEngines = 4
 
-    private var engines: [HighlightrEngine.Configuration: any SyntaxHighlighting] = [:]
+    private var engines = LRUCache<HighlightrEngine.Configuration, any SyntaxHighlighting>(capacity: maxPooledEngines)
+    private var knownThemes: Set<String>?
 
+    /// Synchronous actor method (no internal `await` suspension points) so
+    /// `clear()` can never race with an in-flight engine insertion.
     func engine(for configuration: HighlightrEngine.Configuration) -> any SyntaxHighlighting {
-        if let existing = engines[configuration] {
+        var normalized = configuration
+        if let knownThemes {
+            normalized.theme = knownThemes.contains(configuration.theme) ? configuration.theme : HighlightrEngine.defaultTheme
+        }
+        if let existing = engines.value(for: normalized) {
             return existing
         }
-        let created: any SyntaxHighlighting = HighlightrEngine(configuration: configuration) ?? PlainTextHighlighter()
-        engines[configuration] = created
-        return created
+
+        if let created = HighlightrEngine(configuration: normalized) {
+            if knownThemes == nil {
+                knownThemes = created.availableThemeSet
+            }
+            normalized.theme = created.initialTheme
+            // If normalization mapped an invalid theme onto an already-pooled default VM, reuse it!
+            if let existingAfterNormalize = engines.value(for: normalized) {
+                return existingAfterNormalize
+            }
+            engines.insert(created, for: normalized)
+            return created
+        }
+
+        let fallback: any SyntaxHighlighting = PlainTextHighlighter()
+        engines.insert(fallback, for: normalized)
+        return fallback
+    }
+
+    func clear() {
+        engines.removeAll()
+        knownThemes = nil
+    }
+
+    /// Exposed for testing pool capacity and `clearSharedPool()` eviction.
+    internal var pooledEngineCount: Int {
+        engines.count
+    }
+}
+
+extension SyntaxHighlightingFactory {
+    /// Internal test hook exposing the current number of pooled engines.
+    internal static func sharedPoolCount() async -> Int {
+        await HighlightrPool.shared.pooledEngineCount
     }
 }
 
 /// Lightweight per-view proxy: ~O(1) nanosecond init, zero JSC boot until
 /// `highlight(code:language:)` is invoked, and isolated `setTheme(_:)` so
 /// changing one view's theme never mutates another view's configuration.
+/// Intentionally holds no strong engine reference so `clearSharedPool()` and
+/// pool LRU eviction immediately release unused JavaScriptCore VMs.
 private actor LazySharedHighlighter: SyntaxHighlighting {
     private var configuration: HighlightrEngine.Configuration
-    private var cachedEngine: (any SyntaxHighlighting)?
 
     init(configuration: HighlightrEngine.Configuration) {
         self.configuration = configuration
@@ -47,20 +94,14 @@ private actor LazySharedHighlighter: SyntaxHighlighting {
 
     func highlight(code: String, language: String?) async -> AttributedString {
         guard !code.isEmpty else { return AttributedString() }
-        let engine: any SyntaxHighlighting
-        if let cachedEngine {
-            engine = cachedEngine
-        } else {
-            let resolved = await HighlightrPool.shared.engine(for: configuration)
-            self.cachedEngine = resolved
-            engine = resolved
-        }
+        guard !Task.isCancelled else { return AttributedString(code) }
+        let engine = await HighlightrPool.shared.engine(for: configuration)
+        guard !Task.isCancelled else { return AttributedString(code) }
         return await engine.highlight(code: code, language: language)
     }
 
     func setTheme(_ name: String) async {
         guard configuration.theme != name else { return }
         configuration.theme = name
-        cachedEngine = nil
     }
 }

@@ -17,13 +17,16 @@ enum EntityDecoder {
             return nil
         }
 
-        // Numeric entities: &#123; or &#x1A;
+        // Numeric entities: &#123; (1-7 dec digits) or &#x1A; (1-6 hex digits)
+        // Per CommonMark 0.31 §6.2, U+0000 and invalid Unicode scalar values
+        // (surrogates or > U+10FFFF) must be replaced with U+FFFD.
         if bytes[1] == 0x23 {
             guard count >= 4 else { return nil }
             let third = bytes[2]
             if third == 0x78 || third == 0x58 {
-                // Hexadecimal: &#x...;
-                guard count >= 5 else { return nil }
+                // Hexadecimal: &#x...; (1..6 hex digits)
+                let digitCount = count - 4
+                guard digitCount >= 1, digitCount <= 6 else { return nil }
                 var value: UInt32 = 0
                 for i in 3..<(count - 1) {
                     let b = bytes[i]
@@ -37,26 +40,26 @@ enum EntityDecoder {
                     } else {
                         return nil
                     }
-                    let (mul, o1) = value.multipliedReportingOverflow(by: 16)
-                    let (add, o2) = mul.addingReportingOverflow(digit)
-                    if o1 || o2 { return nil }
-                    value = add
+                    value = (value << 4) | digit
                 }
-                guard let scalar = UnicodeScalar(value) else { return nil }
+                guard value != 0, let scalar = UnicodeScalar(value) else {
+                    return "\u{FFFD}"
+                }
                 return String(scalar)
             } else {
-                // Decimal: &#...;
+                // Decimal: &#...; (1..7 decimal digits)
+                let digitCount = count - 3
+                guard digitCount >= 1, digitCount <= 7 else { return nil }
                 var value: UInt32 = 0
                 for i in 2..<(count - 1) {
                     let b = bytes[i]
                     guard b >= 0x30 && b <= 0x39 else { return nil }
                     let digit = UInt32(b - 0x30)
-                    let (mul, o1) = value.multipliedReportingOverflow(by: 10)
-                    let (add, o2) = mul.addingReportingOverflow(digit)
-                    if o1 || o2 { return nil }
-                    value = add
+                    value = value * 10 + digit
                 }
-                guard let scalar = UnicodeScalar(value) else { return nil }
+                guard value != 0, let scalar = UnicodeScalar(value) else {
+                    return "\u{FFFD}"
+                }
                 return String(scalar)
             }
         }
@@ -164,6 +167,7 @@ struct HTMLEntities: Sendable {
                 return nil
             }
             let totalLen = raw.count
+            let headerEnd = 2 + (entryCount << 1)
             var lo = 0
             var hi = entryCount - 1
 
@@ -171,7 +175,7 @@ struct HTMLEntities: Sendable {
                 let mid = (lo + hi) >> 1
                 let idxPos = 2 + (mid << 1)
                 let offset = Int(base[idxPos]) | (Int(base[idxPos + 1]) << 8)
-                guard offset < totalLen else { return nil }
+                guard offset >= headerEnd, offset < totalLen else { return nil }
 
                 let entryKeyLen = Int(base[offset])
                 let entryKeyStart = offset + 1

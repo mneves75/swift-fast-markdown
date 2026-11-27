@@ -46,19 +46,23 @@ final class SyntaxHighlighterTests: XCTestCase {
     }
 
     func testHighlightrEngineThreadSafety() async throws {
-        // Verify that concurrent access to the actor works correctly
         guard let engine = HighlightrEngine() else {
             throw XCTSkip("Highlighter engine failed to initialize")
         }
 
         let codes = (0..<10).map { "let value\($0) = \($0)" }
-        await withTaskGroup(of: AttributedString.self) { group in
+        let results = await withTaskGroup(of: String.self, returning: Set<String>.self) { group in
             for code in codes {
                 group.addTask {
-                    await engine.highlight(code: code, language: "swift")
+                    String(await engine.highlight(code: code, language: "swift").characters)
                 }
             }
+            var collected: Set<String> = []
+            for await text in group {
+                collected.insert(text)
+            }
+            return collected
         }
-        // If we get here without crashes, concurrent access works
+        XCTAssertEqual(results, Set(codes))
     }
 }

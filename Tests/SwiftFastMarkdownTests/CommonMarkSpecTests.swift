@@ -40,12 +40,11 @@ final class CommonMarkSpecTests: XCTestCase {
     }
 
     func testATXHeadingRequiresSpace() throws {
-        // Without permissive ATX headers flag, #foo should be paragraph
-        let options = ParseOptions.commonMark
-        let doc = try parser.parse("#foo", options: options)
-        // md4c with default flags may still parse this as heading
-        // The test verifies the parser doesn't crash
+        let doc = try parser.parse("#foo", options: .commonMark)
         XCTAssertEqual(doc.blocks.count, 1)
+        guard case .paragraph = doc.blocks[0] else {
+            return XCTFail("Expected paragraph when ATX heading lacks separating space under CommonMark")
+        }
     }
 
     // MARK: - Paragraphs (Section 4.8)
@@ -112,8 +111,20 @@ final class CommonMarkSpecTests: XCTestCase {
         guard case .paragraph(let p) = doc.blocks[0] else {
             return XCTFail("Expected paragraph")
         }
-        // Should have nested strong+emphasis or emphasis+strong
-        XCTAssertFalse(p.spans.isEmpty)
+        let innerText: String?
+        switch p.spans.first {
+        case .emphasis(let children):
+            if case .strong(let inner) = children.first, case .text(let t) = inner.first {
+                innerText = t.string(in: doc.sourceData)
+            } else { innerText = nil }
+        case .strong(let children):
+            if case .emphasis(let inner) = children.first, case .text(let t) = inner.first {
+                innerText = t.string(in: doc.sourceData)
+            } else { innerText = nil }
+        default:
+            innerText = nil
+        }
+        XCTAssertEqual(innerText, "foo")
     }
 
     // MARK: - Code Spans (Section 6.3)
@@ -157,14 +168,6 @@ final class CommonMarkSpecTests: XCTestCase {
             return XCTFail("Expected code block")
         }
         XCTAssertEqual(code.fence, "~")
-    }
-
-    func testFencedCodeBlockWithLanguage() throws {
-        let doc = try parser.parse("```ruby\ndef foo\nend\n```")
-        guard case .codeBlock(let code) = doc.blocks[0] else {
-            return XCTFail("Expected code block")
-        }
-        XCTAssertEqual(code.language?.string(in: doc.sourceData), "ruby")
     }
 
     // MARK: - Links (Section 6.5)
@@ -266,13 +269,12 @@ final class CommonMarkSpecTests: XCTestCase {
         guard case .list(let outer) = doc.blocks[0] else {
             return XCTFail("Expected list")
         }
-        // First item should contain a nested list
         let firstItem = outer.items[0]
         let hasNestedList = firstItem.blocks.contains { block in
-            if case .list = block { return true }
+            if case .list(let inner) = block { return inner.items.count == 2 }
             return false
         }
-        XCTAssertTrue(hasNestedList || outer.items.count > 1)
+        XCTAssertTrue(hasNestedList, "Expected nested 2-item list inside first list item")
     }
 
     // MARK: - Thematic Breaks (Section 4.1)

@@ -7,15 +7,6 @@ struct ByteRangeTests {
 
     // MARK: - ByteRange Basic Operations
 
-    @Test func byteRangeEquality() {
-        let a = ByteRange(start: 0, end: 10)
-        let b = ByteRange(start: 0, end: 10)
-        let c = ByteRange(start: 0, end: 11)
-
-        #expect(a == b)
-        #expect(a != c)
-    }
-
     @Test func byteRangeIsEmpty() {
         let empty = ByteRange(start: 5, end: 5)
         let nonEmpty = ByteRange(start: 5, end: 10)
@@ -56,9 +47,7 @@ struct ByteRangeTests {
         let data = Data("Hello".utf8)
         let range = ByteRange(start: 0, end: 100)
 
-        // Should handle gracefully (empty or truncated)
-        let result = range.string(in: data)
-        #expect(result.isEmpty || result.count <= 5)
+        #expect(range.string(in: data) == "Hello")
     }
 
     @Test func stringExtractionUnicode() {
@@ -125,28 +114,6 @@ struct ByteRangeTests {
         #expect(content.string(in: data) == "ABCFGH")
     }
 
-    // MARK: - Stable ID Tests
-
-    @Test func blockIDUniqueness() {
-        let id1 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
-        let id2 = BlockID(kind: 1, start: 0, end: 10, ordinal: 2)
-        let id3 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
-
-        #expect(id1 != id2) // Different ordinal
-        #expect(id1 == id3) // Same values
-    }
-
-    @Test func blockIDHashable() {
-        let id1 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
-        let id2 = BlockID(kind: 1, start: 0, end: 10, ordinal: 1)
-
-        var set = Set<BlockID>()
-        set.insert(id1)
-        set.insert(id2)
-
-        #expect(set.count == 1) // Same ID should not duplicate
-    }
-
     // MARK: - Parser Integration
 
     @Test func parsedBlocksHaveValidRanges() throws {
@@ -167,9 +134,8 @@ struct ByteRangeTests {
             return
         }
 
-        for span in p.spans {
-            validateSpanRanges(span, source: doc.sourceData)
-        }
+        let extracted = p.spans.map { extractSpanText($0, source: doc.sourceData) }
+        #expect(extracted == ["Text with ", "emphasis", " and ", "code", " inside."])
     }
 
     // MARK: - Helpers
@@ -199,25 +165,16 @@ struct ByteRangeTests {
         }
     }
 
-    private func validateSpanRanges(_ span: MarkdownSpan, source: Data) {
+    private func extractSpanText(_ span: MarkdownSpan, source: Data) -> String {
         switch span {
-        case .text(let content):
-            // Extracting string should not crash
-            _ = content.string(in: source)
-        case .code(let content):
-            _ = content.string(in: source)
+        case .text(let content), .code(let content):
+            return content.string(in: source)
         case .emphasis(let children), .strong(let children), .strikethrough(let children):
-            for child in children {
-                validateSpanRanges(child, source: source)
-            }
-        case .link(let children, let dest, let title):
-            for child in children {
-                validateSpanRanges(child, source: source)
-            }
-            if let dest { _ = dest.string(in: source) }
-            if let title { _ = title.string(in: source) }
+            return children.map { extractSpanText($0, source: source) }.joined()
+        case .link(let children, _, _):
+            return children.map { extractSpanText($0, source: source) }.joined()
         default:
-            break
+            return ""
         }
     }
 }

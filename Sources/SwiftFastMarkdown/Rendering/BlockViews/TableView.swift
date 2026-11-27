@@ -4,9 +4,10 @@ struct TableView: View {
     let block: TableBlock
     let source: Data
     let style: MarkdownStyle
+    var depth: Int = 0
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: true) {
+        let content = ScrollView(.horizontal, showsIndicators: true) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                 // Header rows
                 ForEach(block.headerRows) { row in
@@ -37,7 +38,12 @@ struct TableView: View {
             }
             .padding(12)
         }
-        .liquidGlassSurface(cornerRadius: 12)
+
+        if depth <= 4 {
+            content.liquidGlassSurface(cornerRadius: 12)
+        } else {
+            content
+        }
     }
 
     /// Renders a table cell with appropriate styling for header vs body rows.

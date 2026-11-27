@@ -47,6 +47,7 @@ public struct MarkdownView: View {
                 )
             }
         }
+        .id(document.id)
     }
 }
 

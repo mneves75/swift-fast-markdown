@@ -28,7 +28,7 @@ struct LRUCache<Key: Hashable, Value> {
     private final class Node {
         let key: Key
         var value: Value
-        var prev: Node?
+        weak var prev: Node?
         var next: Node?
 
         init(key: Key, value: Value) {
@@ -38,9 +38,10 @@ struct LRUCache<Key: Hashable, Value> {
     }
 
     init(capacity: Int) {
-        self.capacity = max(1, capacity)
+        let clamped = max(1, capacity)
+        self.capacity = clamped
         self.storage = [:]
-        self.storage.reserveCapacity(capacity)
+        self.storage.reserveCapacity(clamped)
     }
 
     /// Retrieves a value from the cache and marks it as recently used.
@@ -84,6 +85,13 @@ struct LRUCache<Key: Hashable, Value> {
     /// Removes all entries from the cache.
     /// - Complexity: O(n)
     mutating func removeAll() {
+        var current = head
+        while let node = current {
+            let next = node.next
+            node.prev = nil
+            node.next = nil
+            current = next
+        }
         storage.removeAll(keepingCapacity: true)
         head = nil
         tail = nil
