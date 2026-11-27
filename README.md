@@ -36,8 +36,9 @@ dependency and keeps bounds/overflow checks for untrusted input.
 | AI-token stream large (77.6 KB, 1,214 × 64 B) | 2.876 ms | 4.725 ms | — | 1.7 µs/token |
 | `SyntaxHighlightingFactory.makeDefault()` | < 0.001 ms | < 0.001 ms | — | Bounded lazy pool |
 
-100 iterations + 10 warmup per operation (50 for 77.6 KB render, 10 for 77.6 KB
-token stream), Apple Silicon release build. Reproduce with:
+100 iterations + 10 warmup per operation (50 for 77.6 KB render; 10 for 77.6 KB
+token stream and `SyntaxHighlightingFactory.makeDefault()`), Apple Silicon
+release build. Reproduce with:
 
 ```bash
 swift run -c release SwiftFastMarkdownBenchmarks
