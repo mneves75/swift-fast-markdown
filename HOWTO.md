@@ -374,13 +374,17 @@ struct TaskListView: View {
     }
 
     private func updateTaskItem(_ item: ListItemBlock, isChecked: Bool) {
-        // Guard against empty or NUL-only items whose source range is unavailable from md4c
-        guard item.id.end > item.id.start else { return }
+        // Guard to items whose first child is a direct non-empty paragraph so an empty
+        // parent task item with a nested child task list never toggles a child's checkbox
+        guard case .paragraph(let firstParagraph) = item.blocks.first,
+              !firstParagraph.range.isEmpty else {
+            return
+        }
 
-        // Locate the checkbox marker on the line preceding the item's first content byte
+        // Locate the checkbox marker on the line preceding the paragraph's first content byte
         // (searching UTF-8 bytes so LF, CRLF, and bare CR line endings are handled accurately)
         let utf8 = markdown.utf8
-        let contentOffset = min(Int(item.id.start), utf8.count)
+        let contentOffset = min(Int(firstParagraph.range.start), utf8.count)
         let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
         let lineStart = utf8[..<contentIndex]
             .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
