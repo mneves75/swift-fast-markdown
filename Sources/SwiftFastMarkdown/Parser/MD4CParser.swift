@@ -757,15 +757,13 @@ private final class ParserContext {
             let info = detail?.assumingMemoryBound(to: MD_SPAN_A_DETAIL.self)
             let destination = info.map { context.attributeContent($0.pointee.href) } ?? nil
             let title = info.map { context.attributeContent($0.pointee.title) } ?? nil
-            if case .bytes(let r) = destination { context.recordRangeOnTopBlock(r) }
-            if case .bytes(let r) = title { context.recordRangeOnTopBlock(r) }
+            // Do not merge href/title ranges into the enclosing block range: reference links
+            // (`[docs][ref]`) point to an earlier `[ref]: /docs` definition outside this block.
             kind = .link(destination: destination, title: title)
         case MD_SPAN_IMG:
             let info = detail?.assumingMemoryBound(to: MD_SPAN_IMG_DETAIL.self)
             let source = info.map { context.attributeContent($0.pointee.src) } ?? nil
             let title = info.map { context.attributeContent($0.pointee.title) } ?? nil
-            if case .bytes(let r) = source { context.recordRangeOnTopBlock(r) }
-            if case .bytes(let r) = title { context.recordRangeOnTopBlock(r) }
             kind = .image(source: source, title: title)
         case MD_SPAN_CODE:
             kind = .code

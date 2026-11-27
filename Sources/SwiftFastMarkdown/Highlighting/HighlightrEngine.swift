@@ -25,8 +25,8 @@ public actor HighlightrEngine: SyntaxHighlighting {
         /// and unbounded cache growth. Defaults to 64 KiB.
         public var maxHighlightBytes: Int
 
-        /// Default theme is "atom-one-dark" - verified to exist in Highlightr's 89 bundled themes.
-        /// Available themes can be checked via Highlightr().availableThemes()
+        /// Default theme is "atom-one-dark" — validated against Highlightr's bundled themes
+        /// (excluding unsafe themes such as "far"). Available themes come from `Highlightr().availableThemes()`.
         public init(
             theme: String = "atom-one-dark",
             fontName: String? = nil,

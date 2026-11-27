@@ -511,6 +511,17 @@ struct SecurityAuditRegressionTests {
         #expect(entityList.items[1].id.end > entityList.items[1].id.start)
         #expect(entityList.items[1].id.start > entityList.items[0].id.end)
 
+        // Reference-link task item must keep paragraph range on the task line, not pull back to [ref]:
+        let refTaskMD = "[ref]: /docs\n\n- [ ] [docs][ref]\n"
+        let refTaskDoc = try MarkdownParser().parse(refTaskMD)
+        guard case .list(let refList) = refTaskDoc.blocks.first,
+              let refItem = refList.items.first,
+              case .paragraph(let refPara) = refItem.blocks.first else {
+            Issue.record("Expected reference-link task item")
+            return
+        }
+        #expect(Int(refPara.range.start) > "[ref]: /docs\n\n".utf8.count)
+
         // Extreme style values (Int.max listIndent / blockSpacing) must clamp before addition without trapping
         var extremeStyle = MarkdownStyle.default
         extremeStyle.listIndent = Int.max
