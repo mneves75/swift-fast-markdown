@@ -1,26 +1,11 @@
 import SwiftUI
+import Darwin
 
 /// A SwiftUI view that renders streaming markdown content in real-time.
 ///
 /// This view is optimized for AI chat interfaces where content arrives incrementally.
 /// It uses `IncrementalMarkdownParser` to efficiently parse only new content and
 /// leverages stable block IDs for minimal view updates.
-///
-/// ## Example Usage
-///
-/// ```swift
-/// struct ChatView: View {
-///     @State private var streamingContent = ""
-///
-///     var body: some View {
-///         StreamingMarkdownView(
-///             content: $streamingContent,
-///             style: .default,
-///             isStreaming: true
-///         )
-///     }
-/// }
-/// ```
 @MainActor
 public struct StreamingMarkdownView: View {
     @Binding private var content: String
@@ -29,8 +14,11 @@ public struct StreamingMarkdownView: View {
     private let isStreaming: Bool
     private let onToggleTask: ((ListItemBlock, Bool) -> Void)?
 
-    @State private var parser: IncrementalMarkdownParser
-    @State private var document: MarkdownDocument
+    @State private var parser = IncrementalMarkdownParser()
+    @State private var document = MarkdownDocument(blocks: [], sourceData: Data())
+    @State private var initialized = false
+    @State private var parserFinalized = false
+    @State private var lastParsedContent = ""
 
     public init(
         content: Binding<String>,
@@ -44,17 +32,33 @@ public struct StreamingMarkdownView: View {
         self.highlighter = highlighter
         self.isStreaming = isStreaming
         self.onToggleTask = onToggleTask
-
-        let initialParser = IncrementalMarkdownParser()
-        let initialDoc = initialParser.append(content.wrappedValue)
-        self._parser = State(initialValue: initialParser)
-        self._document = State(initialValue: initialDoc)
     }
 
     public var body: some View {
         wrappedContentStack
-            .onChange(of: content) { oldValue, newValue in
-                updateDocument(from: oldValue, to: newValue)
+            .onAppear {
+                if !initialized {
+                    initialized = true
+                    if !content.isEmpty {
+                        document = parser.append(content)
+                        lastParsedContent = content
+                        if !isStreaming {
+                            document = parser.finalize()
+                            parserFinalized = true
+                        }
+                    }
+                }
+            }
+            .onChange(of: content) { _, newValue in
+                let prior = initialized ? lastParsedContent : ""
+                initialized = true
+                updateDocument(from: prior, to: newValue)
+            }
+            .onChange(of: isStreaming) { _, streaming in
+                if !streaming && initialized && !parserFinalized {
+                    document = parser.finalize()
+                    parserFinalized = true
+                }
             }
     }
 
@@ -63,7 +67,7 @@ public struct StreamingMarkdownView: View {
     @ViewBuilder
     private var wrappedContentStack: some View {
         if #available(iOS 26, macOS 26, *) {
-            GlassEffectContainer(spacing: CGFloat(style.blockSpacing) * 4.0) {
+            SwiftUI.GlassEffectContainer(spacing: CGFloat(style.blockSpacing) * 4.0) {
                 contentStack
             }
         } else {
@@ -90,34 +94,56 @@ public struct StreamingMarkdownView: View {
                 StreamingIndicator()
             }
         }
-        // Note: Intentionally no global .animation() modifier here.
-        // Global animation on LazyVStack causes layout recalculation on every
-        // block change during streaming, leading to frame drops. Individual
-        // blocks use .transition() for enter/exit animations which is more
-        // efficient and doesn't affect sibling blocks.
     }
 
     private func updateDocument(from oldValue: String, to newValue: String) {
-        // onChange(of:) only fires when the value actually changed (Equatable),
-        // so no extra "last processed" bookkeeping is needed here.
         if newValue.isEmpty {
-            // Content cleared - reset parser
             parser.reset()
+            parserFinalized = false
+            lastParsedContent = ""
             document = MarkdownDocument(blocks: [], sourceData: Data())
-        } else if newValue.hasPrefix(oldValue) && !oldValue.isEmpty {
-            // Content appended - incremental update
-            let appendedContent = String(newValue.dropFirst(oldValue.count))
-            document = parser.append(appendedContent)
-        } else {
-            // Content changed non-incrementally - full reparse
-            parser.reset()
-            document = parser.append(newValue)
+            return
         }
 
-        // Finalize if not streaming
+        if !parserFinalized, let suffix = Self.fastUTF8Suffix(of: newValue, afterPrefix: oldValue) {
+            // Fast incremental append via SIMD memcmp + O(1) UTF-8 byte index
+            // instead of O(n) Unicode-normalized String.hasPrefix + dropFirst.
+            document = parser.append(suffix)
+        } else {
+            // Content changed non-incrementally or arrived after finalize() - full reparse
+            parser.reset()
+            parserFinalized = false
+            document = parser.append(newValue)
+        }
+        lastParsedContent = newValue
+
         if !isStreaming {
             document = parser.finalize()
+            parserFinalized = true
         }
+    }
+
+    /// Checks whether `newValue` starts with the exact UTF-8 bytes of `oldValue`
+    /// using `memcmp`, and if so returns the appended suffix in O(1) index time.
+    internal static func fastUTF8Suffix(of newValue: String, afterPrefix oldValue: String) -> String? {
+        guard !oldValue.isEmpty else { return nil }
+        let oldCount = oldValue.utf8.count
+        let newCount = newValue.utf8.count
+        guard newCount >= oldCount else { return nil }
+
+        var oldCopy = oldValue
+        var newCopy = newValue
+        let matches: Bool = oldCopy.withUTF8 { oldBuf in
+            newCopy.withUTF8 { newBuf in
+                guard let oldPtr = oldBuf.baseAddress, let newPtr = newBuf.baseAddress else {
+                    return oldBuf.isEmpty
+                }
+                return memcmp(oldPtr, newPtr, oldBuf.count) == 0
+            }
+        }
+        guard matches else { return nil }
+        let splitIndex = newValue.utf8.index(newValue.utf8.startIndex, offsetBy: oldCount)
+        return String(newValue[splitIndex...])
     }
 }
 
@@ -171,6 +197,9 @@ extension StreamingMarkdownView {
 // MARK: - AsyncStream Support
 
 /// A view that renders markdown from an AsyncStream of content chunks.
+///
+/// Feeds incoming chunks directly into `IncrementalMarkdownParser` without
+/// concatenating a growing full-document `String` or performing prefix diffs.
 @MainActor
 public struct AsyncStreamMarkdownView<S: AsyncSequence>: View where S.Element == String {
     private let stream: S
@@ -178,8 +207,10 @@ public struct AsyncStreamMarkdownView<S: AsyncSequence>: View where S.Element ==
     private let highlighter: any SyntaxHighlighting
     private let onToggleTask: ((ListItemBlock, Bool) -> Void)?
 
-    @State private var content: String = ""
+    @State private var parser = IncrementalMarkdownParser()
+    @State private var document = MarkdownDocument(blocks: [], sourceData: Data())
     @State private var isStreaming: Bool = true
+    @State private var hasReceivedContent: Bool = false
 
     public init(
         stream: S,
@@ -194,22 +225,51 @@ public struct AsyncStreamMarkdownView<S: AsyncSequence>: View where S.Element ==
     }
 
     public var body: some View {
-        StreamingMarkdownView(
-            content: $content,
-            style: style,
-            highlighter: highlighter,
-            isStreaming: isStreaming,
-            onToggleTask: onToggleTask
-        )
-        .task {
-            do {
-                for try await chunk in stream {
-                    content += chunk
+        wrappedContentStack
+            .task {
+                do {
+                    for try await chunk in stream {
+                        if !chunk.isEmpty {
+                            hasReceivedContent = true
+                            document = parser.append(chunk)
+                        }
+                    }
+                } catch {
+                    // Stream ended or errored
                 }
-            } catch {
-                // Stream ended or errored
+                document = parser.finalize()
+                isStreaming = false
             }
-            isStreaming = false
+    }
+
+    @ViewBuilder
+    private var wrappedContentStack: some View {
+        if #available(iOS 26, macOS 26, *) {
+            SwiftUI.GlassEffectContainer(spacing: CGFloat(style.blockSpacing) * 4.0) {
+                contentStack
+            }
+        } else {
+            contentStack
+        }
+    }
+
+    @ViewBuilder
+    private var contentStack: some View {
+        LazyVStack(alignment: .leading, spacing: CGFloat(style.blockSpacing) * 4.0) {
+            ForEach(document.blocks) { block in
+                BlockContentView(
+                    block: block,
+                    source: document.sourceData,
+                    style: style,
+                    highlighter: highlighter,
+                    onToggleTask: onToggleTask
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if isStreaming && hasReceivedContent {
+                StreamingIndicator()
+            }
         }
     }
 }

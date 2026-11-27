@@ -25,7 +25,7 @@ Add SwiftFastMarkdown to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mneves75/swift-fast-markdown.git", from: "1.2.0")
+    .package(url: "https://github.com/mneves75/swift-fast-markdown.git", from: "1.3.0")
 ]
 ```
 
@@ -65,10 +65,10 @@ struct ContentView: View {
 
     var body: some View {
         ScrollView {
-            MarkdownView(
-                document: MarkdownParser.parse(markdown)
-            )
-            .padding()
+            if let document = try? MarkdownParser().parse(markdown) {
+                MarkdownView(document: document)
+                    .padding()
+            }
         }
     }
 }
@@ -93,7 +93,7 @@ struct SimpleMarkdownView: View {
 For use with standard SwiftUI `Text` or UIKit:
 
 ```swift
-let document = MarkdownParser.parse("Hello **World**")
+let document = try MarkdownParser().parse("Hello **World**")
 let renderer = AttributedStringRenderer()
 let attributed = renderer.render(document, style: .default)
 
@@ -216,6 +216,7 @@ class ChatViewModel: ObservableObject {
 let customStyle = MarkdownStyle(
     // Typography
     baseFont: .body,
+    codeFont: .system(.body, design: .monospaced),
     headingFonts: [
         .system(size: 32, weight: .bold),    // H1
         .system(size: 28, weight: .bold),    // H2
@@ -224,18 +225,17 @@ let customStyle = MarkdownStyle(
         .system(size: 18, weight: .medium),   // H5
         .system(size: 16, weight: .medium)    // H6
     ],
-    codeFont: .system(.body, design: .monospaced),
 
     // Colors
-    textColor: .primary,
     linkColor: .blue,
-    codeBackgroundColor: Color(.systemGray6),
-    blockQuoteColor: .secondary,
+    textColor: .primary,
+    codeTextColor: .primary,
+    codeBackgroundColor: Color.gray.opacity(0.15),
+    quoteStripeColor: .secondary,
 
     // Spacing
-    blockSpacing: 4,        // Base unit (multiplied by 4 for actual spacing)
-    listIndent: 6,          // Base unit for list indentation
-    codeBlockPadding: 4     // Base unit for code block padding
+    blockSpacing: 4,        // Blank-line / spacing unit between blocks
+    listIndent: 6           // Space count for nested list indentation
 )
 
 // Apply to view
@@ -250,13 +250,13 @@ struct AdaptiveMarkdownView: View {
     let document: MarkdownDocument
 
     var style: MarkdownStyle {
-        MarkdownStyle(
-            textColor: colorScheme == .dark ? .white : .black,
-            linkColor: colorScheme == .dark ? .cyan : .blue,
-            codeBackgroundColor: colorScheme == .dark
-                ? Color(.systemGray5)
-                : Color(.systemGray6)
-        )
+        var style = MarkdownStyle.default
+        style.textColor = colorScheme == .dark ? .white : .black
+        style.linkColor = colorScheme == .dark ? .cyan : .blue
+        style.codeBackgroundColor = colorScheme == .dark
+            ? Color.gray.opacity(0.25)
+            : Color.gray.opacity(0.12)
+        return style
     }
 
     var body: some View {
@@ -312,6 +312,12 @@ Implement the `SyntaxHighlighting` protocol for custom highlighting:
 
 ```swift
 public actor CustomHighlighter: SyntaxHighlighting {
+    private var themeName = "default"
+
+    public func setTheme(_ name: String) async {
+        themeName = name
+    }
+
     public func highlight(
         code: String,
         language: String?
@@ -319,13 +325,12 @@ public actor CustomHighlighter: SyntaxHighlighting {
         var result = AttributedString(code)
         result.font = .system(.body, design: .monospaced)
 
-        // Add custom highlighting logic here
-        // For example, simple keyword highlighting:
+        // Add custom highlighting logic here (using `themeName` and `language`)
         if language == "swift" {
-            // Highlight Swift keywords
             let keywords = ["func", "var", "let", "class", "struct"]
             for keyword in keywords {
-                // Apply styling to keywords...
+                // Apply styling to matching keyword ranges...
+                _ = keyword
             }
         }
 
@@ -369,19 +374,73 @@ struct TaskListView: View {
     }
 
     private func updateTaskItem(_ item: ListItemBlock, isChecked: Bool) {
-        // Replace [ ] with [x] or vice versa at the item's position
-        let range = item.range
-        let oldMarker = isChecked ? "[ ]" : "[x]"
-        let newMarker = isChecked ? "[x]" : "[ ]"
+        // Find the first direct non-empty leaf block (paragraph, heading, code, HTML, or table)
+        // before any nested container so an empty parent task item with a nested child list
+        // never toggles a child's checkbox (empty or container-only parent tasks are skipped)
+        var anchorStart: UInt32?
+        for block in item.blocks {
+            switch block {
+            case .paragraph(let para) where !para.range.isEmpty:
+                anchorStart = para.range.start
+            case .heading(let heading) where !heading.range.isEmpty:
+                anchorStart = heading.range.start
+            case .codeBlock(let code) where code.id.end > code.id.start:
+                anchorStart = code.id.start
+            case .htmlBlock(let html) where html.id.end > html.id.start:
+                anchorStart = html.id.start
+            case .table(let table) where table.id.end > table.id.start:
+                anchorStart = table.id.start
+            case .paragraph, .heading, .codeBlock, .htmlBlock, .table, .thematicBreak:
+                continue
+            case .list, .blockQuote:
+                break
+            }
+            break
+        }
+        guard let anchorStart else { return }
 
-        // Update markdown string
-        if let textRange = Range(
-            NSRange(location: Int(range.start), length: Int(range.length)),
-            in: markdown
-        ) {
-            let itemText = String(markdown[textRange])
-            let updated = itemText.replacingOccurrences(of: oldMarker, with: newMarker)
-            markdown.replaceSubrange(textRange, with: updated)
+        // Locate the checkbox marker on the anchor block's line, or walk back past any blank
+        // or blockquote-prefix-only lines to the task marker line (searching UTF-8 bytes so
+        // LF, CRLF, and bare CR line endings work accurately)
+        let utf8 = markdown.utf8
+        let contentOffset = min(Int(anchorStart), utf8.count)
+        let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
+        let lineStart = utf8[..<contentIndex]
+            .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
+            .map { utf8.index(after: $0) } ?? markdown.startIndex
+
+        let candidates = isChecked ? ["[ ]"] : ["[x]", "[X]"]
+        let replacement = isChecked ? "[x]" : "[ ]"
+
+        let findMarker: (Range<String.Index>) -> Range<String.Index>? = { searchRange in
+            candidates.lazy.compactMap { markdown.range(of: $0, range: searchRange) }.first
+        }
+
+        if let markerRange = findMarker(lineStart..<contentIndex) {
+            markdown.replaceSubrange(markerRange, with: replacement)
+        } else {
+            // Walk back past any blank lines to the task marker line (e.g., "- [ ]\r\n\r\n  &copy;\r\n")
+            var cursor = lineStart
+            while cursor > markdown.startIndex {
+                var prevEnd = utf8.index(before: cursor)
+                if utf8[prevEnd] == 0x0A && prevEnd > markdown.startIndex {
+                    let beforeLF = utf8.index(before: prevEnd)
+                    if utf8[beforeLF] == 0x0D { prevEnd = beforeLF }
+                }
+                let prevStart = utf8[..<prevEnd]
+                    .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
+                    .map { utf8.index(after: $0) } ?? markdown.startIndex
+                // Treat whitespace-only and blockquote-prefix-only (">") lines as blank
+                let isBlank = utf8[prevStart..<prevEnd].allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x3E }
+                if isBlank {
+                    cursor = prevStart
+                    continue
+                }
+                if let markerRange = findMarker(prevStart..<prevEnd) {
+                    markdown.replaceSubrange(markerRange, with: replacement)
+                }
+                break
+            }
         }
     }
 }
@@ -395,8 +454,9 @@ SwiftFastMarkdown automatically uses iOS 26 Liquid Glass effects when available.
 
 ### Automatic Behavior
 
-- **iOS 26+**: Code blocks, block quotes, and tables use `.glassEffect(.regular)`
-- **iOS 18-25**: Falls back to `.ultraThinMaterial` or `.regularMaterial`
+- **iOS 26+**: Code blocks, block quotes, and tables at view nesting depth `<= 4` use `.glassEffect(.regular)`
+- **iOS 18-25**: Falls back to `.ultraThinMaterial` or `.regularMaterial` at view nesting depth `<= 4`
+- **Depth > 4 (up to view recursion cap of 32)**: Skips stacked glass/material surfaces to prevent GPU offscreen-pass blowup on deeply nested containers
 
 ### Custom Glass Configuration
 
@@ -476,10 +536,13 @@ struct PaginatedMarkdownView: View {
     @State private var visibleBlocks = 50
 
     var body: some View {
-        LazyVStack {
-            ForEach(document.blocks.prefix(visibleBlocks)) { block in
-                BlockContentView(block: block, ...)
-            }
+        LazyVStack(alignment: .leading) {
+            MarkdownView(
+                document: MarkdownDocument(
+                    blocks: Array(document.blocks.prefix(visibleBlocks)),
+                    sourceData: document.sourceData
+                )
+            )
 
             if visibleBlocks < document.blocks.count {
                 Button("Load More") {
@@ -547,6 +610,14 @@ The package ships without `.unsafeFlags`, so bounds and overflow checks remain
 enabled in the parser. This also makes it consumable as a remote SwiftPM
 dependency (SwiftPM refuses to resolve packages that use `.unsafeFlags`).
 
+### Input, nesting, and highlighting bounds
+
+- `MD4CParser.maxInputByteCount` (256 MiB) throws `MarkdownParserError.inputTooLarge` before invoking C `md_parse`.
+- `MD4CParser.maxNestingDepth` (64) flattens deeply nested blockquotes, lists, and inline spans while preserving leaf text, keeping Swift ARC destruction and renderers stack-safe on 512 KB cooperative threads.
+- `HighlightrEngine.Configuration.maxHighlightBytes` (default 64 KiB) falls back to plain text on huge code blocks, sets `ignoreIllegals = true` and requires an explicitly allowlisted language (mapping standard aliases like `js`/`ts`/`py`, blocking `livescript`/`ls`, and skipping direct `language: nil` or unknown-language calls; note pinned `Highlightr 2.3.0` / `highlight.js 11.11.1` retains internal sub-language auto-detection for multi-language grammars such as `http` and its own `isUndefined` fallback), and respects `Task.isCancelled`.
+- Call `await SyntaxHighlightingFactory.clearSharedPool()` on logout, account switch, or memory pressure to evict pooled JavaScriptCore VMs and cached code snippets.
+- All 118 unit and security regression tests verify these invariants via `swift test`.
+
 ---
 
 ## Advanced Topics
@@ -556,7 +627,7 @@ dependency (SwiftPM refuses to resolve packages that use `.unsafeFlags`).
 Access the parsed document structure directly:
 
 ```swift
-let document = MarkdownParser.parse(markdown)
+let document = try MarkdownParser().parse(markdown)
 
 for block in document.blocks {
     switch block {
@@ -564,14 +635,15 @@ for block in document.blocks {
         print("Heading level \(heading.level)")
 
     case .codeBlock(let code):
-        let content = code.codeRange.string(in: document.sourceData)
-        print("Code (\(code.language ?? "plain")): \(content)")
+        let content = code.content.string(in: document.sourceData)
+        let language = code.language?.string(in: document.sourceData) ?? "plain"
+        print("Code (\(language)): \(content)")
 
     case .list(let list):
         print("List with \(list.items.count) items")
 
     case .table(let table):
-        print("Table: \(table.header.count) columns")
+        print("Table: \(table.alignments.count) columns")
 
     default:
         break
@@ -584,16 +656,17 @@ for block in document.blocks {
 Extract text efficiently without copying:
 
 ```swift
-let document = MarkdownParser.parse("Hello **World**")
+let document = try MarkdownParser().parse("Hello **World**")
 
-// Get text from a span's byte range
+// Get text from a span's TextContent
 if case .paragraph(let para) = document.blocks.first,
-   case .strong(let strong) = para.spans.first(where: {
+   case .strong(let children) = para.spans.first(where: {
        if case .strong = $0 { return true }
        return false
-   }) {
-    // Zero-copy string extraction
-    let text = strong.textRange.string(in: document.sourceData)
+   }),
+   case .text(let content) = children.first {
+    // Decode UTF-8 slice on demand from sourceData
+    let text = content.string(in: document.sourceData)
     print(text) // "World"
 }
 ```
@@ -620,9 +693,8 @@ struct CustomMarkdownView: View {
 
                 default:
                     // Default rendering for other blocks
-                    BlockContentView(
-                        block: block,
-                        source: document.sourceData,
+                    MarkdownView(
+                        document: MarkdownDocument(blocks: [block], sourceData: document.sourceData),
                         style: .default,
                         highlighter: SyntaxHighlightingFactory.makeDefault()
                     )
@@ -640,7 +712,7 @@ All public APIs are designed for concurrent use:
 ```swift
 // Safe: Parsing on background thread
 Task.detached {
-    let document = MarkdownParser.parse(largeMarkdown)
+    let document = try MarkdownParser().parse(largeMarkdown)
     await MainActor.run {
         self.document = document
     }
@@ -702,9 +774,9 @@ struct ChatMessageView: View {
     }
 
     var messageStyle: MarkdownStyle {
-        MarkdownStyle(
-            textColor: message.role == .user ? .primary : .secondary
-        )
+        var style = MarkdownStyle.default
+        style.textColor = message.role == .user ? .primary : .secondary
+        return style
     }
 }
 ```
@@ -737,7 +809,7 @@ struct DocViewer: View {
         .task {
             do {
                 let content = try String(contentsOf: markdownURL)
-                document = MarkdownParser.parse(content)
+                document = try MarkdownParser().parse(content)
             } catch {
                 self.error = error
             }

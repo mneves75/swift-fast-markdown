@@ -6,7 +6,7 @@ essentials for agents that look for `AGENTS.md`.
 
 ## Project
 
-**SwiftFastMarkdown** — high-performance, SwiftUI-native Markdown parser and
+**SwiftFastMarkdown** (v1.3.0) — high-performance, SwiftUI-native Markdown parser and
 renderer (iOS 18+ / macOS 15+). Wraps the vendored md4c C parser
 (CommonMark 0.31 + GFM); renders to `AttributedString` and SwiftUI views; has an
 incremental parser for streaming and an LRU render cache.
@@ -16,7 +16,7 @@ incremental parser for streaming and an LRU render cache.
 ```bash
 swift build                 # debug build
 swift build -c release      # release build
-swift test                  # full test suite — keep green
+swift test                  # full test suite (118 tests — keep green)
 swift run -c release SwiftFastMarkdownBenchmarks   # benchmarks
 ```
 
@@ -32,15 +32,20 @@ swift run -c release SwiftFastMarkdownBenchmarks   # benchmarks
 ## Guardrails
 
 - **Treat Markdown as untrusted.** Route any destination→URL conversion through
-  `AttributedStringRenderer.safeLinkURL` (allows only `http`/`https`/`mailto`/`tel`
-  and relative links).
+  `AttributedStringRenderer.safeLinkURL` (blocks protocol-relative `//host`,
+  whitespace/control-obfuscated schemes, RFC 3986 §4.2 colons, and non-allowlisted schemes).
 - **No `.unsafeFlags`** in `Package.swift` (breaks remote SwiftPM consumption;
   `-Ounchecked` disables safety checks on untrusted input).
-- **Pointer math** goes through `MD4CParser.pointerRange` (bounds-checked).
-- **Byte-range offsetting** lives once in `BlockOffsetter` — don't duplicate it.
-- **Read `IncrementalState` via `snapshot()`** (single lock, no torn reads).
-- **AttributedString**: append to one accumulator, reuse cached static constants,
-  avoid `a + b` concatenation in hot paths.
+- **Pointer math** goes through `MD4CParser.pointerRange` (unsigned, bounds-checked);
+  keep `MD4CParser.maxInputByteCount` (256 MiB) and `maxNestingDepth` (64).
+- **Incremental byte-range shifting** lives in `MD4CParser.parseSlice(..., baseOffset:startingOrdinal:scratch:)`
+  with `md4c`-backed top-level block stabilization in `IncrementalState` (do not reintroduce `BlockOffsetter` or a duplicate CommonMark fence/HTML state machine).
+- **Serialize all `IncrementalState` reads and mutations** under its single
+  `NSLock` (no torn reads); rotate `documentID` on every mutating append/finalize.
+- **AttributedString**: preserve the single-pass UTF-8 builder + per-slice UTF-8
+  validation + prebuilt `StylePalette` + POD `RunPatch` pipeline.
+- **Highlighting**: preserve theme/language allowlists, `maxHighlightBytes` cap,
+  `Task.isCancelled` checks, and the bounded `HighlightrPool` (`clearSharedPool()`).
 - **Bug fixes start with a failing test.** Keep `swift test` green.
 
 ## Keep docs in sync

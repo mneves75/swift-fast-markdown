@@ -95,30 +95,6 @@ final class GFMExtensionTests: XCTestCase {
 
     // MARK: - Task Lists
 
-    func testTaskListChecked() throws {
-        let input = "- [x] Done task"
-        let doc = try parser.parse(input)
-
-        guard case .list(let list) = doc.blocks[0] else {
-            return XCTFail("Expected list block")
-        }
-
-        XCTAssertTrue(list.items[0].isTask)
-        XCTAssertTrue(list.items[0].isChecked)
-    }
-
-    func testTaskListUnchecked() throws {
-        let input = "- [ ] Pending task"
-        let doc = try parser.parse(input)
-
-        guard case .list(let list) = doc.blocks[0] else {
-            return XCTFail("Expected list block")
-        }
-
-        XCTAssertTrue(list.items[0].isTask)
-        XCTAssertFalse(list.items[0].isChecked)
-    }
-
     func testMixedTaskList() throws {
         let input = """
         - [x] Completed
@@ -187,36 +163,19 @@ final class GFMExtensionTests: XCTestCase {
 
     // MARK: - Autolinks
 
-    func testPermissiveWWWAutolink() throws {
-        // Test with explicit angle bracket autolink which is more reliable
-        let input = "<http://www.example.com>"
+    func testPermissiveWWWAndURLAutolinks() throws {
+        let input = "Visit www.example.com and https://example.com/path"
         let doc = try parser.parse(input)
 
         guard case .paragraph(let p) = doc.blocks[0] else {
             return XCTFail("Expected paragraph")
         }
 
-        let hasLink = p.spans.contains { span in
-            if case .link = span { return true }
+        let linkCount = p.spans.filter {
+            if case .link = $0 { return true }
             return false
-        }
-        XCTAssertTrue(hasLink)
-    }
-
-    func testPermissiveURLAutolink() throws {
-        // Test angle bracket autolink
-        let input = "<https://example.com/path>"
-        let doc = try parser.parse(input)
-
-        guard case .paragraph(let p) = doc.blocks[0] else {
-            return XCTFail("Expected paragraph")
-        }
-
-        let hasLink = p.spans.contains { span in
-            if case .link = span { return true }
-            return false
-        }
-        XCTAssertTrue(hasLink)
+        }.count
+        XCTAssertEqual(linkCount, 2, "Expected both permissive www and URL autolinks to parse as .link spans")
     }
 
     func testAngleBracketAutolink() throws {
@@ -235,23 +194,6 @@ final class GFMExtensionTests: XCTestCase {
     }
 
     // MARK: - Combined Features
-
-    func testTableWithTaskList() throws {
-        // Tables can contain task list items in cells (as text)
-        let input = """
-        | Task | Status |
-        |------|--------|
-        | Fix bug | Done |
-        | Write docs | Pending |
-        """
-        let doc = try parser.parse(input)
-
-        guard case .table(let table) = doc.blocks[0] else {
-            return XCTFail("Expected table block")
-        }
-
-        XCTAssertEqual(table.bodyRows.count, 2)
-    }
 
     func testStrikethroughInTable() throws {
         let input = """

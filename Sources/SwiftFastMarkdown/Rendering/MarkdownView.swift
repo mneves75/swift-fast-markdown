@@ -23,10 +23,10 @@ public struct MarkdownView: View {
     }
 
     public var body: some View {
-        // On iOS 26+, wrap in GlassEffectContainer for proper glass blending
-        // between code blocks, block quotes, and tables with glass surfaces.
+        // On iOS 26+/macOS 26+, wrap in native SwiftUI.GlassEffectContainer for
+        // proper glass blending without offscreen compositingGroup rasterization.
         if #available(iOS 26, macOS 26, *) {
-            GlassEffectContainer(spacing: CGFloat(style.blockSpacing) * 4.0) {
+            SwiftUI.GlassEffectContainer(spacing: CGFloat(style.blockSpacing) * 4.0) {
                 contentStack
             }
         } else {
@@ -47,6 +47,7 @@ public struct MarkdownView: View {
                 )
             }
         }
+        .id(document.id)
     }
 }
 
