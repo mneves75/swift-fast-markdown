@@ -398,7 +398,7 @@ struct EditorDemo: View {
 // MARK: - Static Markdown Demo
 
 struct StaticMarkdownDemo: View {
-    private let sampleMarkdown = """
+    private static let sampleMarkdown = """
     # SwiftFastMarkdown Demo
 
     This demonstrates **static markdown rendering** with full CommonMark support.
@@ -429,11 +429,13 @@ struct StaticMarkdownDemo: View {
     *Rendered with SwiftFastMarkdown*
     """
 
+    private static let parsedDocument: MarkdownDocument? = try? MarkdownParser().parse(sampleMarkdown)
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let document = try? MarkdownParser().parse(sampleMarkdown) {
+                    if let document = Self.parsedDocument {
                         MarkdownView(document: document)
                             .padding()
                     }
@@ -448,7 +450,7 @@ struct StaticMarkdownDemo: View {
 
 struct StreamingMarkdownDemo: View {
     @State private var isStreaming = false
-    @State private var streamedContent = ""
+    @State private var document = MarkdownDocument(blocks: [], sourceData: Data())
     @State private var parser = IncrementalMarkdownParser()
 
     private let fullContent = """
@@ -486,10 +488,8 @@ struct StreamingMarkdownDemo: View {
             VStack {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        let document = parser.append("")
                         MarkdownView(document: document)
                             .padding()
-                            .animation(.easeInOut(duration: 0.15), value: document.blocks.count)
                     }
                 }
 
@@ -516,8 +516,8 @@ struct StreamingMarkdownDemo: View {
 
     private func startStreaming() {
         isStreaming = true
-        streamedContent = ""
         parser.reset()
+        document = MarkdownDocument(blocks: [], sourceData: Data())
 
         // Simulate streaming at ~50 chars per chunk
         let chunks = stride(from: 0, to: fullContent.count, by: 50).map { start in
@@ -530,20 +530,19 @@ struct StreamingMarkdownDemo: View {
             for chunk in chunks {
                 try? await Task.sleep(for: .milliseconds(80))
                 await MainActor.run {
-                    streamedContent += chunk
-                    _ = parser.append(chunk)
+                    document = parser.append(chunk)
                 }
             }
             await MainActor.run {
-                _ = parser.finalize()
+                document = parser.finalize()
                 isStreaming = false
             }
         }
     }
 
     private func resetStream() {
-        streamedContent = ""
         parser.reset()
+        document = MarkdownDocument(blocks: [], sourceData: Data())
         isStreaming = false
     }
 }
@@ -551,7 +550,7 @@ struct StreamingMarkdownDemo: View {
 // MARK: - GFM Features Demo
 
 struct GFMFeaturesDemo: View {
-    private let gfmMarkdown = """
+    private static let gfmMarkdown = """
     # GFM Extensions Demo
 
     SwiftFastMarkdown supports GitHub Flavored Markdown extensions via md4c flags.
@@ -587,11 +586,13 @@ struct GFMFeaturesDemo: View {
     | `Code` works | *Italic* as well |
     """
 
+    private static let parsedDocument: MarkdownDocument? = try? MarkdownParser().parse(gfmMarkdown)
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let document = try? MarkdownParser().parse(gfmMarkdown) {
+                    if let document = Self.parsedDocument {
                         MarkdownView(document: document)
                             .padding()
                     }

@@ -1,25 +1,13 @@
 import Foundation
+import Darwin
 
 /// An incremental markdown parser that efficiently processes streaming content.
 ///
-/// This parser maintains state between chunks and only re-parses content that
-/// hasn't yet reached a stable block boundary. This achieves O(n) incremental
-/// updates vs O(n²) for naive re-parsing.
-///
-/// ## Algorithm
-///
-/// 1. Append new chunk to `pendingBuffer`
-/// 2. Scan for block boundaries:
-///    - Blank lines (paragraph end)
-///    - Fenced code block close (```)
-///    - List item completion
-///    - Heading (always single line)
-/// 3. For each detected complete block:
-///    - Parse block content with md4c
-///    - Assign stable ID
-///    - Append to `stableBlocks`
-///    - Remove from `pendingBuffer`
-/// 4. Return Document(stableBlocks + parse(pendingBuffer))
+/// This parser maintains a single append-only source buffer, scans only newly
+/// completed lines for block boundaries via SIMD `memchr` (O(chunk) per append,
+/// O(n) total), reuses scratch parser buffers across chunks, and updates the
+/// pending tail of `cachedBlocks` in place (protected by Swift Array CoW when
+/// callers retain earlier `MarkdownDocument` snapshots).
 ///
 /// ## Correctness Invariant
 ///
@@ -38,16 +26,10 @@ public final class IncrementalMarkdownParser: Sendable {
         }
     }
 
-    private let configuration: Configuration
-    private let parser: MD4CParser
-
-    // State is managed through isolated instances
     private let state: IncrementalState
 
     public init(configuration: Configuration = Configuration()) {
-        self.configuration = configuration
-        self.parser = MD4CParser()
-        self.state = IncrementalState()
+        self.state = IncrementalState(options: configuration.options)
     }
 
     /// Appends a chunk of markdown content and returns the updated document.
@@ -55,8 +37,7 @@ public final class IncrementalMarkdownParser: Sendable {
     /// - Parameter chunk: The new markdown content to append.
     /// - Returns: The current document state including stable and pending blocks.
     public func append(_ chunk: String) -> MarkdownDocument {
-        state.append(chunk)
-        return buildDocument()
+        state.appendAndBuild(chunk)
     }
 
     /// Appends a chunk of markdown content as raw bytes.
@@ -64,16 +45,14 @@ public final class IncrementalMarkdownParser: Sendable {
     /// - Parameter data: The new markdown content as Data.
     /// - Returns: The current document state.
     public func append(_ data: Data) -> MarkdownDocument {
-        state.append(data)
-        return buildDocument()
+        state.appendAndBuild(data)
     }
 
     /// Signals that no more content will be appended and finalizes the document.
     ///
     /// - Returns: The final parsed document.
     public func finalize() -> MarkdownDocument {
-        state.finalize()
-        return buildDocument()
+        state.finalizeAndBuild()
     }
 
     /// Resets the parser to its initial state.
@@ -89,33 +68,6 @@ public final class IncrementalMarkdownParser: Sendable {
     /// Returns the count of stable blocks parsed so far.
     public var stableBlockCount: Int {
         state.stableBlockCount
-    }
-
-    // MARK: - Private
-
-    private func buildDocument() -> MarkdownDocument {
-        // Take one consistent snapshot of the state; reading individual
-        // properties separately could interleave with a concurrent append().
-        let snapshot = state.snapshot()
-
-        // Parse pending buffer to get any incomplete blocks
-        let pendingBlocks: [MarkdownBlock]
-        if snapshot.isFinalized || snapshot.pendingData.isEmpty {
-            pendingBlocks = []
-        } else if let pendingDoc = try? parser.parse(snapshot.pendingData, options: configuration.options) {
-            // Offset the blocks to account for stable content
-            pendingBlocks = pendingDoc.blocks.map { block in
-                BlockOffsetter.offsetBlock(block, by: UInt32(snapshot.stableEndOffset))
-            }
-        } else {
-            pendingBlocks = []
-        }
-
-        return MarkdownDocument(
-            blocks: snapshot.stableBlocks + pendingBlocks,
-            sourceData: snapshot.fullData,
-            id: snapshot.documentID
-        )
     }
 }
 
@@ -241,50 +193,58 @@ enum BlockOffsetter {
 
 /// Thread-safe state container for incremental parsing.
 ///
-/// ## Design Note: NSLock vs Swift 6 Mutex
-/// We use NSLock + @unchecked Sendable rather than Swift 6's Synchronization.Mutex
-/// because:
-/// 1. NSLock is battle-tested and correct
-/// 2. The lock pattern here is simple and verifiable by inspection
-/// 3. Mutex would require restructuring into Mutex<MutableState> wrapper pattern
-/// 4. Both approaches provide the same runtime behavior (os_unfair_lock underneath)
-///
-/// The @unchecked Sendable is appropriate because we manually verify that all
-/// mutable state access is protected by the lock.
+/// Key performance invariants:
+/// - Single append-only `sourceData: Data` buffer (zero `stable + pending` copies).
+/// - Single `cachedBlocks: [MarkdownBlock]` array whose prefix `0..<stableCount`
+///   holds finalized blocks and whose suffix `stableCount...` is replaced in
+///   place on each token — O(1) when uniquely referenced, and automatically
+///   CoW-isolated if the caller retains a prior `MarkdownDocument`.
+/// - Reusable `MD4CParser.ReusableScratch` eliminates per-chunk parser buffer
+///   allocations.
+/// - Incremental `memchr` line scanner inspects each incoming byte at most once.
 private final class IncrementalState: @unchecked Sendable {
-    /// A consistent view of the parser state, captured under a single lock
-    /// acquisition so concurrent appends can never produce torn reads.
     struct Snapshot {
-        let stableBlocks: [MarkdownBlock]
-        let pendingData: Data
+        let blocks: [MarkdownBlock]
+        let sourceData: Data
+        let stableCount: Int
         let stableEndOffset: Int
-        let fullData: Data
         let isFinalized: Bool
         let documentID: UUID
     }
 
     private let lock = NSLock()
+    private let options: ParseOptions
+    private let parser = MD4CParser()
+    private let scratch = MD4CParser.ReusableScratch()
 
     // All mutable state below is only accessed while holding `lock`.
-    private var stableBlocks: [MarkdownBlock] = []
-    private var stableData: Data = Data()
-    private var pendingBuffer: [UInt8] = []
+    private var cachedBlocks: [MarkdownBlock] = []
+    private var stableCount: Int = 0
+    private var sourceData: Data = Data()
+    private var stableEndOffset: Int = 0
+    private var lastOrdinal: UInt32 = 0
     private var finalized: Bool = false
     private var documentID: UUID = UUID()
 
-    private let parser = MD4CParser()
+    // Incremental line-scanner cursor state (each byte scanned at most once).
+    private var scanOffset: Int = 0
+    private var inFencedBlock: Bool = false
+    private var fenceChar: UInt8 = 0
+    private var fenceLength: Int = 0
+    private var sawLineSinceStable: Bool = false
+
+    init(options: ParseOptions) {
+        self.options = options
+    }
 
     func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        let pendingData = Data(pendingBuffer)
         return Snapshot(
-            stableBlocks: stableBlocks,
-            pendingData: pendingData,
-            stableEndOffset: stableData.count,
-            // Skip the concatenation when there is nothing pending (common
-            // right after a block boundary stabilizes).
-            fullData: pendingData.isEmpty ? stableData : stableData + pendingData,
+            blocks: cachedBlocks,
+            sourceData: sourceData,
+            stableCount: stableCount,
+            stableEndOffset: stableEndOffset,
             isFinalized: finalized,
             documentID: documentID
         )
@@ -293,176 +253,243 @@ private final class IncrementalState: @unchecked Sendable {
     var stableBlockCount: Int {
         lock.lock()
         defer { lock.unlock() }
-        return stableBlocks.count
+        return stableCount
     }
 
     var pendingString: String {
         lock.lock()
         defer { lock.unlock() }
-        return String(decoding: pendingBuffer, as: UTF8.self)
+        guard stableEndOffset < sourceData.count else { return "" }
+        return sourceData.withUnsafeBytes { raw in
+            let slice = raw[stableEndOffset..<raw.count]
+            return String(decoding: slice, as: UTF8.self)
+        }
     }
 
-    func append(_ chunk: String) {
-        append(Data(chunk.utf8))
-    }
-
-    func append(_ data: Data) {
+    func appendAndBuild(_ chunk: String) -> MarkdownDocument {
         lock.lock()
         defer { lock.unlock() }
 
-        guard !finalized else { return }
+        guard !finalized else {
+            return MarkdownDocument(blocks: cachedBlocks, sourceData: sourceData, id: documentID)
+        }
 
-        pendingBuffer.append(contentsOf: data)
-        processStableBlocks()
-    }
-
-    func finalize() {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard !finalized else { return }
-        finalized = true
-
-        // Parse any remaining pending content as stable
-        if !pendingBuffer.isEmpty {
-            let pendingData = Data(pendingBuffer)
-            if let doc = try? parser.parse(pendingData) {
-                let offsetBlocks = doc.blocks.map { block in
-                    BlockOffsetter.offsetBlock(block, by: UInt32(stableData.count))
+        if !chunk.isEmpty {
+            var copy = chunk
+            copy.withUTF8 { buf in
+                if let base = buf.baseAddress, !buf.isEmpty {
+                    sourceData.append(base, count: buf.count)
                 }
-                stableBlocks.append(contentsOf: offsetBlocks)
-                stableData.append(pendingData)
-                pendingBuffer.removeAll()
+            }
+            updateBlocksLocked()
+        }
+
+        return MarkdownDocument(blocks: cachedBlocks, sourceData: sourceData, id: documentID)
+    }
+
+    func appendAndBuild(_ data: Data) -> MarkdownDocument {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !finalized else {
+            return MarkdownDocument(blocks: cachedBlocks, sourceData: sourceData, id: documentID)
+        }
+
+        if !data.isEmpty {
+            sourceData.append(data)
+            updateBlocksLocked()
+        }
+
+        return MarkdownDocument(blocks: cachedBlocks, sourceData: sourceData, id: documentID)
+    }
+
+    func finalizeAndBuild() -> MarkdownDocument {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if !finalized {
+            finalized = true
+            // Drop any previous pending tail blocks before committing final tail
+            if cachedBlocks.count > stableCount {
+                cachedBlocks.removeSubrange(stableCount..<cachedBlocks.count)
+            }
+            if stableEndOffset < sourceData.count {
+                let start = stableEndOffset
+                let length = sourceData.count - start
+                let parsed: (blocks: [MarkdownBlock], lastOrdinal: UInt32)? = sourceData.withUnsafeBytes { raw in
+                    guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                        return nil
+                    }
+                    let slice = UnsafeBufferPointer(start: base + start, count: length)
+                    return try? parser.parseSlice(
+                        slice,
+                        baseOffset: UInt32(start),
+                        startingOrdinal: lastOrdinal,
+                        options: options,
+                        scratch: scratch
+                    )
+                }
+                if let parsed {
+                    cachedBlocks.append(contentsOf: parsed.blocks)
+                    stableCount = cachedBlocks.count
+                    lastOrdinal = parsed.lastOrdinal
+                    stableEndOffset = sourceData.count
+                    scanOffset = sourceData.count
+                    inFencedBlock = false
+                    fenceChar = 0
+                    fenceLength = 0
+                    sawLineSinceStable = false
+                }
             }
         }
+
+        return MarkdownDocument(blocks: cachedBlocks, sourceData: sourceData, id: documentID)
     }
 
     func reset() {
         lock.lock()
         defer { lock.unlock() }
 
-        stableBlocks.removeAll()
-        stableData.removeAll()
-        pendingBuffer.removeAll()
+        cachedBlocks.removeAll(keepingCapacity: true)
+        stableCount = 0
+        sourceData.removeAll(keepingCapacity: true)
+        stableEndOffset = 0
+        lastOrdinal = 0
         finalized = false
         documentID = UUID()
+        scanOffset = 0
+        inFencedBlock = false
+        fenceChar = 0
+        fenceLength = 0
+        sawLineSinceStable = false
     }
 
-    // MARK: - Block Boundary Detection
+    // MARK: - Incremental Stabilization + In-Place Pending Tail Update
 
-    private func processStableBlocks() {
-        // Find the last stable block boundary
-        guard let boundaryIndex = findLastStableBoundary() else { return }
+    private func updateBlocksLocked() {
+        // 1. Remove previous pending tail blocks in O(pendingBlocks)
+        if cachedBlocks.count > stableCount {
+            cachedBlocks.removeSubrange(stableCount..<cachedBlocks.count)
+        }
 
-        // Extract stable content
-        let stableContent = Array(pendingBuffer[0..<boundaryIndex])
-        let stableContentData = Data(stableContent)
-
-        // Parse stable content
-        if let doc = try? parser.parse(stableContentData) {
-            // Offset blocks to account for already-stable data
-            let offsetBlocks = doc.blocks.map { block in
-                BlockOffsetter.offsetBlock(block, by: UInt32(stableData.count))
+        // 2. Advance incremental line scanner and commit newly stabilized blocks
+        if let boundary = findNewBoundaryLocked(), boundary > stableEndOffset {
+            let start = stableEndOffset
+            let length = boundary - start
+            let parsed: (blocks: [MarkdownBlock], lastOrdinal: UInt32)? = sourceData.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return nil
+                }
+                let slice = UnsafeBufferPointer(start: base + start, count: length)
+                return try? parser.parseSlice(
+                    slice,
+                    baseOffset: UInt32(start),
+                    startingOrdinal: lastOrdinal,
+                    options: options,
+                    scratch: scratch
+                )
             }
-            stableBlocks.append(contentsOf: offsetBlocks)
-            stableData.append(stableContentData)
+            if let parsed {
+                cachedBlocks.append(contentsOf: parsed.blocks)
+                stableCount = cachedBlocks.count
+                lastOrdinal = parsed.lastOrdinal
+                stableEndOffset = boundary
+                sawLineSinceStable = (scanOffset > boundary)
+            }
+        }
 
-            // Remove stable content from pending buffer
-            pendingBuffer.removeFirst(boundaryIndex)
+        // 3. Parse only the remaining pending tail and append directly onto cachedBlocks
+        let totalCount = sourceData.count
+        if stableEndOffset < totalCount {
+            let start = stableEndOffset
+            let length = totalCount - start
+            let pending: [MarkdownBlock]? = sourceData.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return nil
+                }
+                let slice = UnsafeBufferPointer(start: base + start, count: length)
+                return try? parser.parseSlice(
+                    slice,
+                    baseOffset: UInt32(start),
+                    startingOrdinal: lastOrdinal,
+                    options: options,
+                    scratch: scratch
+                ).blocks
+            }
+            if let pending, !pending.isEmpty {
+                cachedBlocks.append(contentsOf: pending)
+            }
         }
     }
 
-    /// Finds the index of the last stable block boundary in the pending buffer.
-    ///
-    /// A block boundary is detected at:
-    /// - Double newline (blank line) outside of fenced code blocks
-    /// - Closing fence (```) matching opening fence
-    private func findLastStableBoundary() -> Int? {
-        var lastBoundary: Int?
-        var i = 0
-        var inFencedBlock = false
-        var fenceChar: UInt8 = 0
-        var fenceLength = 0
-        var atLineStart = true
+    /// Scans only newly completed lines (terminated by `0x0A`) from `scanOffset`
+    /// using `memchr`, so every byte in the stream is inspected at most once.
+    private func findNewBoundaryLocked() -> Int? {
+        guard scanOffset < sourceData.count else { return nil }
 
-        while i < pendingBuffer.count {
-            let byte = pendingBuffer[i]
+        return sourceData.withUnsafeBytes { raw -> Int? in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return nil
+            }
+            let totalCount = raw.count
+            var lastBoundary: Int?
 
-            // Check for fenced code block markers at line start
-            if atLineStart && !inFencedBlock && (byte == 0x60 || byte == 0x7E) {
-                let (isFence, length) = checkFence(at: i, char: byte)
-                if isFence {
-                    inFencedBlock = true
-                    fenceChar = byte
-                    fenceLength = length
-                    i += length
-                    // Skip to end of line
-                    while i < pendingBuffer.count && pendingBuffer[i] != 0x0A {
-                        i += 1
-                    }
-                    if i < pendingBuffer.count {
-                        i += 1 // Skip newline
-                    }
-                    atLineStart = true
-                    continue
+            while scanOffset < totalCount {
+                let remaining = totalCount - scanOffset
+                guard let found = memchr(base + scanOffset, 0x0A, remaining) else {
+                    break
                 }
-            } else if atLineStart && inFencedBlock && byte == fenceChar {
-                // Inside fenced block, check for closing fence
-                let (isFence, length) = checkFence(at: i, char: byte)
-                if isFence && length >= fenceLength {
-                    // Found closing fence
-                    inFencedBlock = false
-                    i += length
-                    // Skip to end of line to mark boundary
-                    while i < pendingBuffer.count && pendingBuffer[i] != 0x0A {
-                        i += 1
-                    }
-                    if i < pendingBuffer.count {
-                        i += 1 // Include newline
-                        lastBoundary = i
-                    }
-                    atLineStart = true
-                    continue
+
+                let nlPos = UnsafeRawPointer(found) - UnsafeRawPointer(base)
+                let nextLineStart = nlPos + 1
+
+                var firstNonWS = scanOffset
+                while firstNonWS < nlPos {
+                    let b = base[firstNonWS]
+                    if b != 0x20 && b != 0x09 { break }
+                    firstNonWS += 1
                 }
+
+                if firstNonWS == nlPos {
+                    if !inFencedBlock && sawLineSinceStable {
+                        lastBoundary = nextLineStart
+                    }
+                    sawLineSinceStable = true
+                } else {
+                    let firstByte = base[firstNonWS]
+                    if !inFencedBlock && (firstByte == 0x60 || firstByte == 0x7E) {
+                        var len = 0
+                        var p = firstNonWS
+                        while p < nlPos && base[p] == firstByte {
+                            len += 1
+                            p += 1
+                        }
+                        if len >= 3 {
+                            inFencedBlock = true
+                            fenceChar = firstByte
+                            fenceLength = len
+                        }
+                    } else if inFencedBlock && firstByte == fenceChar {
+                        var len = 0
+                        var p = firstNonWS
+                        while p < nlPos && base[p] == fenceChar {
+                            len += 1
+                            p += 1
+                        }
+                        if len >= fenceLength {
+                            inFencedBlock = false
+                            fenceChar = 0
+                            fenceLength = 0
+                            lastBoundary = nextLineStart
+                        }
+                    }
+                    sawLineSinceStable = true
+                }
+
+                scanOffset = nextLineStart
             }
 
-            // Check for blank line (double newline) outside fenced blocks
-            if !inFencedBlock && byte == 0x0A {
-                var j = i + 1
-                // Skip whitespace
-                while j < pendingBuffer.count && (pendingBuffer[j] == 0x20 || pendingBuffer[j] == 0x09) {
-                    j += 1
-                }
-                if j < pendingBuffer.count && pendingBuffer[j] == 0x0A {
-                    // Found blank line - stable boundary after the blank line
-                    lastBoundary = j + 1
-                }
-            }
-
-            // Track line starts
-            if byte == 0x0A {
-                atLineStart = true
-            } else if byte != 0x20 && byte != 0x09 {
-                atLineStart = false
-            }
-
-            i += 1
+            return lastBoundary
         }
-
-        return lastBoundary
-    }
-
-    /// Checks if there's a valid fence starting at the given index.
-    private func checkFence(at index: Int, char: UInt8) -> (isFence: Bool, length: Int) {
-        var length = 0
-        var i = index
-
-        while i < pendingBuffer.count && pendingBuffer[i] == char {
-            length += 1
-            i += 1
-        }
-
-        // Fence must be at least 3 characters
-        return (length >= 3, length)
     }
 }

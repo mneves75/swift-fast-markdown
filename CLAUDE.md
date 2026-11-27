@@ -34,7 +34,7 @@ Sources/SwiftFastMarkdown/
 │                  BlockViews/ (per-block SwiftUI views), LiquidGlass/ (iOS 26 glass)
 ├── Highlighting/  SyntaxHighlighting protocol, HighlightrEngine (actor), LRUCache
 ├── Style/         MarkdownStyle (Hashable, Sendable)
-└── Resources/     HTMLEntities.json, PrivacyInfo.xcprivacy
+└── Resources/     HTMLEntities.bin (compact sorted binary table, 28.7 KB), PrivacyInfo.xcprivacy
 
 Sources/CMD4C/     vendored md4c.c / md4c.h (do not edit by hand — it's upstream)
 ```
@@ -64,10 +64,12 @@ Key design points:
 - **No `.unsafeFlags` in Package.swift.** SwiftPM refuses to resolve packages
   that use them as remote dependencies, and `-Ounchecked` would disable safety
   checks on untrusted input. Rely on SwiftPM's default release optimization.
-- **AttributedString building**: append to one accumulator; reuse the cached
-  static constants (`newline`, `space`, `cellSeparator`, `thematicBreakString`)
-  instead of allocating `AttributedString("\n")` in loops. Avoid `a + b`
-  concatenation in hot paths.
+- **AttributedString building**: `AttributedStringRenderer` uses a single-pass
+  UTF-8 byte buffer (`SinglePassBuilder`), a prebuilt `StylePalette` of
+  `AttributeContainer`s, and POD `RunPatch` spans applied monotonically onto a
+  single `AttributedString(fullString, attributes: baseAttributes)`. Keep
+  `safeLinkURL` on all link/wikiLink paths and preserve the malformed-UTF-8
+  slice fallback.
 - **Tests are the contract.** When fixing a bug, add a failing test first, then
   fix. Keep `swift test` green before committing.
 

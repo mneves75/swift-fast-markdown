@@ -18,171 +18,286 @@ public struct MD4CParser: Sendable {
             return MarkdownDocument(blocks: [], sourceData: data)
         }
 
-        let context = ParserContext(sourceData: data)
-
         return try data.withUnsafeBytes { buffer in
             guard let baseAddress = buffer.bindMemory(to: MD_CHAR.self).baseAddress else {
                 return MarkdownDocument(blocks: [], sourceData: data)
             }
-            context.basePointer = baseAddress
-
-            var parser = MD_PARSER()
-            parser.abi_version = 0
-            parser.flags = UInt32(options.rawValue)
-            parser.enter_block = ParserContext.enterBlockCallback
-            parser.leave_block = ParserContext.leaveBlockCallback
-            parser.enter_span = ParserContext.enterSpanCallback
-            parser.leave_span = ParserContext.leaveSpanCallback
-            parser.text = ParserContext.textCallback
-            parser.debug_log = ParserContext.debugLogCallback
-            parser.syntax = nil
-
-            let result = md_parse(baseAddress, MD_SIZE(data.count), &parser, Unmanaged.passUnretained(context).toOpaque())
-            if result != 0 {
-                throw MarkdownParserError.parsingFailed(Int32(result))
-            }
-
-            return context.buildDocument()
+            let context = ParserContext(estimatedDataCount: data.count)
+            let (blocks, _) = try parseBuffer(
+                context: context,
+                baseAddress: baseAddress,
+                count: data.count,
+                baseOffset: 0,
+                startingOrdinal: 0,
+                options: options
+            )
+            return MarkdownDocument(blocks: blocks, sourceData: data)
         }
+    }
+
+    /// Reusable scratch storage for repeated slice parses (e.g. streaming in
+    /// `IncrementalMarkdownParser`). Not thread-safe; caller owns synchronization.
+    internal final class ReusableScratch {
+        fileprivate let context: ParserContext
+
+        init() {
+            self.context = ParserContext(estimatedDataCount: 512)
+        }
+    }
+
+    /// Internal fast path for incremental parsing: parses a contiguous byte
+    /// slice directly with a pre-applied `baseOffset`, monotonic `startingOrdinal`,
+    /// and optional reusable scratch buffers (zero scratch allocations per chunk).
+    internal func parseSlice(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        baseOffset: UInt32,
+        startingOrdinal: UInt32,
+        options: ParseOptions = .default,
+        scratch: ReusableScratch? = nil
+    ) throws -> (blocks: [MarkdownBlock], lastOrdinal: UInt32) {
+        guard !bytes.isEmpty, let rawBase = bytes.baseAddress else {
+            return ([], startingOrdinal)
+        }
+        let context = scratch?.context ?? ParserContext(estimatedDataCount: bytes.count)
+        return try rawBase.withMemoryRebound(to: MD_CHAR.self, capacity: bytes.count) { mdBase in
+            try parseBuffer(
+                context: context,
+                baseAddress: mdBase,
+                count: bytes.count,
+                baseOffset: baseOffset,
+                startingOrdinal: startingOrdinal,
+                options: options
+            )
+        }
+    }
+
+    private func parseBuffer(
+        context: ParserContext,
+        baseAddress: UnsafePointer<MD_CHAR>,
+        count: Int,
+        baseOffset: UInt32,
+        startingOrdinal: UInt32,
+        options: ParseOptions
+    ) throws -> (blocks: [MarkdownBlock], lastOrdinal: UInt32) {
+        context.reset(
+            basePointer: baseAddress,
+            dataCount: count,
+            baseOffset: baseOffset,
+            startingOrdinal: startingOrdinal
+        )
+        defer { context.clearTemporaryState() }
+
+        var parser = MD_PARSER()
+        parser.abi_version = 0
+        parser.flags = UInt32(options.rawValue)
+        parser.enter_block = ParserContext.enterBlockCallback
+        parser.leave_block = ParserContext.leaveBlockCallback
+        parser.enter_span = ParserContext.enterSpanCallback
+        parser.leave_span = ParserContext.leaveSpanCallback
+        parser.text = ParserContext.textCallback
+        parser.debug_log = nil
+        parser.syntax = nil
+
+        let result = md_parse(baseAddress, MD_SIZE(count), &parser, Unmanaged.passUnretained(context).toOpaque())
+        if result != 0 {
+            throw MarkdownParserError.parsingFailed(Int32(result))
+        }
+
+        return (context.finishDocumentBlocks(), context.ordinal)
     }
 }
 
-private final class ParserContext {
-    var basePointer: UnsafePointer<MD_CHAR>?
-    let sourceData: Data
-    private var blockStack: [BlockState] = []
-    private var inlineStack: [SpanContainer] = []
-    private var inlineRootStack: [Int] = []
-    private var tableSectionStack: [TableSection] = []
-    private var ordinal: UInt32 = 0
+// MARK: - Zero-ARC-Copy Scratch Stack
 
-    init(sourceData: Data) {
-        self.sourceData = sourceData
+/// Manual LIFO scratch stack that moves elements into exact-capacity `[T]` via
+/// `moveInitialize` — zero ARC retains/releases on pop, zero CoW sharing of
+/// scratch storage, and leak-free `deinit` even if parsing throws.
+private final class ScratchStack<T> {
+    private var storage: UnsafeMutablePointer<T>
+    private var capacity: Int
+    private(set) var count: Int = 0
+
+    init(initialCapacity: Int) {
+        let cap = Swift.max(4, initialCapacity)
+        self.capacity = cap
+        self.storage = UnsafeMutablePointer<T>.allocate(capacity: cap)
     }
 
-    func buildDocument() -> MarkdownDocument {
-        if case .doc(let blocks) = blockStack.first {
-            return MarkdownDocument(blocks: blocks, sourceData: sourceData)
+    deinit {
+        if count > 0 {
+            storage.deinitialize(count: count)
         }
-        return MarkdownDocument(blocks: [], sourceData: sourceData)
+        storage.deallocate()
     }
 
+    @inline(__always)
+    func append(_ element: T) {
+        if count == capacity {
+            grow()
+        }
+        storage.advanced(by: count).initialize(to: element)
+        count += 1
+    }
+
+    @inline(__always)
+    var lastElement: T? {
+        count > 0 ? storage[count - 1] : nil
+    }
+
+    @inline(__always)
+    func replaceLast(_ element: T) {
+        storage[count - 1] = element
+    }
+
+    @inline(__always)
+    func takeArray(from start: Int) -> [T] {
+        let n = count - start
+        if n <= 0 { return [] }
+        let src = storage.advanced(by: start)
+        let result = Array<T>(unsafeUninitializedCapacity: n) { dest, initializedCount in
+            dest.baseAddress!.moveInitialize(from: src, count: n)
+            initializedCount = n
+        }
+        count = start
+        return result
+    }
+
+    @inline(__always)
+    func popLast() -> T {
+        count -= 1
+        return storage.advanced(by: count).move()
+    }
+
+    @inline(__always)
+    func removeAllKeepingCapacity() {
+        if count > 0 {
+            storage.deinitialize(count: count)
+            count = 0
+        }
+    }
+
+    @inline(never)
+    private func grow() {
+        let newCapacity = capacity << 1
+        let newStorage = UnsafeMutablePointer<T>.allocate(capacity: newCapacity)
+        if count > 0 {
+            newStorage.moveInitialize(from: storage, count: count)
+        }
+        storage.deallocate()
+        storage = newStorage
+        capacity = newCapacity
+    }
+}
+
+// MARK: - Flat-Buffer Single-Pass Parser Context
+
+/// Builds the Markdown IR in a single pass using flat, strictly-LIFO
+/// `ScratchStack` buffers (zero O(n²) copies, zero ARC retain/release churn on
+/// slice extraction, and O(1) incremental byte-range tracking on each frame).
+private final class ParserContext {
+    var basePointer: UnsafePointer<MD_CHAR>!
+    var baseAddressInt: Int = 0
+    var dataCount: Int = 0
+    var baseOffset: UInt32 = 0
+    var ordinal: UInt32 = 0
+
+    // Frame stacks
+    private var blockStack: [BlockFrame] = []
+    private var tableSectionStack: [TableSection] = []
+    private var spanStack: [SpanFrame] = []
+
+    // Zero-ARC-copy LIFO child buffers
+    private let blockChildren: ScratchStack<MarkdownBlock>
+    private let listItems: ScratchStack<ListItemBlock>
+    private let tableHeaderRows: ScratchStack<TableRow>
+    private let tableBodyRows: ScratchStack<TableRow>
+    private let tableCells: ScratchStack<TableCell>
+    private let textRanges: ScratchStack<ByteRange>
+    private let spanChildren: ScratchStack<MarkdownSpan>
+    private let inlineCodeRanges: ScratchStack<ByteRange>
+
+    init(estimatedDataCount: Int) {
+        if estimatedDataCount >= 1024 {
+            let estimatedBlocks = Swift.min(512, Swift.max(8, estimatedDataCount >> 7))
+            self.blockChildren = ScratchStack(initialCapacity: estimatedBlocks)
+            self.spanChildren = ScratchStack(initialCapacity: 32)
+            self.blockStack.reserveCapacity(16)
+            self.spanStack.reserveCapacity(8)
+        } else {
+            self.blockChildren = ScratchStack(initialCapacity: 8)
+            self.spanChildren = ScratchStack(initialCapacity: 12)
+            self.blockStack.reserveCapacity(8)
+            self.spanStack.reserveCapacity(4)
+        }
+        self.listItems = ScratchStack(initialCapacity: 8)
+        self.tableHeaderRows = ScratchStack(initialCapacity: 4)
+        self.tableBodyRows = ScratchStack(initialCapacity: 8)
+        self.tableCells = ScratchStack(initialCapacity: 8)
+        self.textRanges = ScratchStack(initialCapacity: 8)
+        self.inlineCodeRanges = ScratchStack(initialCapacity: 8)
+    }
+
+    func reset(
+        basePointer: UnsafePointer<MD_CHAR>,
+        dataCount: Int,
+        baseOffset: UInt32,
+        startingOrdinal: UInt32
+    ) {
+        self.basePointer = basePointer
+        self.baseAddressInt = Int(bitPattern: basePointer)
+        self.dataCount = dataCount
+        self.baseOffset = baseOffset
+        self.ordinal = startingOrdinal
+        clearTemporaryState()
+    }
+
+    func clearTemporaryState() {
+        blockStack.removeAll(keepingCapacity: true)
+        tableSectionStack.removeAll(keepingCapacity: true)
+        spanStack.removeAll(keepingCapacity: true)
+        blockChildren.removeAllKeepingCapacity()
+        listItems.removeAllKeepingCapacity()
+        tableHeaderRows.removeAllKeepingCapacity()
+        tableBodyRows.removeAllKeepingCapacity()
+        tableCells.removeAllKeepingCapacity()
+        textRanges.removeAllKeepingCapacity()
+        spanChildren.removeAllKeepingCapacity()
+        inlineCodeRanges.removeAllKeepingCapacity()
+    }
+
+    func finishDocumentBlocks() -> [MarkdownBlock] {
+        guard !blockStack.isEmpty, case .doc = blockStack[0].kind else {
+            return []
+        }
+        return blockChildren.takeArray(from: 0)
+    }
+
+    @inline(__always)
     private func nextID(kind: BlockKind, range: ByteRange) -> BlockID {
         ordinal &+= 1
         return BlockID(kind: kind.rawValue, start: range.start, end: range.end, ordinal: ordinal)
     }
 
-    private func appendBlock(_ block: MarkdownBlock) {
-        guard let last = blockStack.indices.last else {
-            blockStack = [.doc(blocks: [block])]
-            return
-        }
-
-        switch blockStack[last] {
-        case .doc(let blocks):
-            blockStack[last] = .doc(blocks: blocks + [block])
-        case .blockQuote(let blocks):
-            blockStack[last] = .blockQuote(blocks: blocks + [block])
-        case .listItem(let isTask, let isChecked, let blocks):
-            blockStack[last] = .listItem(isTask: isTask, isChecked: isChecked, blocks: blocks + [block])
-        default:
-            // If the current container cannot accept blocks, append to nearest parent.
-            if let parentIndex = blockStack.lastIndex(where: { $0.acceptsChildBlocks }) {
-                switch blockStack[parentIndex] {
-                case .doc(let blocks):
-                    blockStack[parentIndex] = .doc(blocks: blocks + [block])
-                case .blockQuote(let blocks):
-                    blockStack[parentIndex] = .blockQuote(blocks: blocks + [block])
-                case .listItem(let isTask, let isChecked, let blocks):
-                    blockStack[parentIndex] = .listItem(isTask: isTask, isChecked: isChecked, blocks: blocks + [block])
-                default:
-                    break
-                }
-            }
-        }
-    }
-
-    private func beginInlineBlock() {
-        inlineRootStack.append(inlineStack.count)
-        inlineStack.append(SpanContainer(kind: .root))
-    }
-
-    private func endInlineBlock() -> [MarkdownSpan] {
-        guard let rootIndex = inlineRootStack.popLast() else {
-            return []
-        }
-        let root = inlineStack.removeLast()
-        assert(rootIndex == inlineStack.count)
-        return root.children
-    }
-
-    private func appendSpan(_ span: MarkdownSpan) {
-        guard let lastIndex = inlineStack.indices.last else {
-            return
-        }
-        inlineStack[lastIndex].children.append(span)
-    }
-
-    private func addInlineText(_ content: TextContent) {
-        appendSpan(.text(content))
-    }
-
-    private func addInlineCode(_ content: TextContent) {
-        appendSpan(.code(content))
-    }
-
-    private func addInlineHTML(_ content: TextContent) {
-        appendSpan(.html(content))
-    }
-
-    private func currentInlineContainer() -> SpanContainer? {
-        inlineStack.last
-    }
-
-    private func computeRange(from spans: [MarkdownSpan]) -> ByteRange {
-        var minStart: UInt32?
-        var maxEnd: UInt32?
-        for span in spans {
-            span.walkByteRanges { range in
-                if minStart == nil || range.start < minStart! {
-                    minStart = range.start
-                }
-                if maxEnd == nil || range.end > maxEnd! {
-                    maxEnd = range.end
-                }
-            }
-        }
-        if let minStart, let maxEnd {
-            return ByteRange(start: minStart, end: maxEnd)
-        }
-        return ByteRange(start: 0, end: 0)
-    }
-
+    /// Bounds-checked conversion of an md4c pointer + length into a `ByteRange`
+    /// shifted by `baseOffset`. All pointer arithmetic flows through here.
+    @inline(__always)
     private func pointerRange(_ text: UnsafePointer<MD_CHAR>?, size: MD_SIZE) -> ByteRange? {
-        guard let basePointer, let text else {
-            return nil
-        }
-        // md4c passes raw pointers into the original buffer; compute byte offsets from the base.
-        // First, verify the pointer is within bounds to prevent overflow/crash.
-        let baseAddress = Int(bitPattern: basePointer)
+        guard let text else { return nil }
         let textAddress = Int(bitPattern: text)
+        guard textAddress >= baseAddressInt else { return nil }
 
-        // Check if text pointer is within the buffer range
-        guard textAddress >= baseAddress else {
-            return nil
-        }
-
-        let offset = textAddress - baseAddress
+        let offset = textAddress - baseAddressInt
         let end = offset + Int(size)
+        guard offset >= 0, end >= offset, end <= dataCount else { return nil }
 
-        // Guard against overflow and ensure end doesn't exceed buffer
-        guard offset >= 0, end >= offset, end <= sourceData.count else {
-            return nil
-        }
+        let (startWithBase, o1) = UInt32(offset).addingReportingOverflow(baseOffset)
+        let (endWithBase, o2) = UInt32(end).addingReportingOverflow(baseOffset)
+        guard !o1, !o2 else { return nil }
 
-        return ByteRange(start: UInt32(offset), end: UInt32(end))
+        return ByteRange(start: startWithBase, end: endWithBase)
     }
 
+    @inline(__always)
     private func attributeContent(_ attribute: MD_ATTRIBUTE) -> TextContent? {
         guard let range = pointerRange(attribute.text, size: attribute.size), !range.isEmpty else {
             return nil
@@ -190,8 +305,98 @@ private final class ParserContext {
         return .bytes(range)
     }
 
+    @inline(__always)
+    private func recordRangeOnTopBlock(_ range: ByteRange) {
+        guard !blockStack.isEmpty else { return }
+        blockStack[blockStack.count - 1].include(range)
+    }
+
+    @inline(__always)
+    private func propagateRangeToParent(_ frame: BlockFrame) {
+        guard frame.hasRange, !blockStack.isEmpty else { return }
+        blockStack[blockStack.count - 1].include(minStart: frame.minStart, maxEnd: frame.maxEnd)
+    }
+
+    @inline(__always)
+    private func appendBlock(_ block: MarkdownBlock) {
+        blockChildren.append(block)
+    }
+
+    @inline(__always)
+    private func beginInlineBlock() {
+        spanStack.append(SpanFrame(
+            kind: .root,
+            childStart: spanChildren.count,
+            codeRangeStart: inlineCodeRanges.count
+        ))
+    }
+
+    @inline(__always)
+    private func endInlineBlock() -> [MarkdownSpan] {
+        guard let frame = spanStack.popLast() else { return [] }
+        return spanChildren.takeArray(from: frame.childStart)
+    }
+
+    @inline(__always)
+    private func appendSpan(_ span: MarkdownSpan) {
+        guard !spanStack.isEmpty else { return }
+        spanChildren.append(span)
+    }
+
+    /// Appends a `.text(.bytes(range))` span, coalescing with the previous
+    /// sibling span inside the same container when their byte ranges are
+    /// strictly contiguous (`prev.end == range.start`).
+    @inline(__always)
+    private func appendInlineByteRange(_ range: ByteRange) {
+        guard let frame = spanStack.last else { return }
+        recordRangeOnTopBlock(range)
+        if spanChildren.count > frame.childStart,
+           case .text(.bytes(let prev)) = spanChildren.lastElement,
+           prev.end == range.start {
+            spanChildren.replaceLast(.text(.bytes(ByteRange(start: prev.start, end: range.end))))
+            return
+        }
+        spanChildren.append(.text(.bytes(range)))
+    }
+
+    @inline(__always)
+    private func appendCoalescedRange(to stack: ScratchStack<ByteRange>, startIndex: Int, range: ByteRange) {
+        if stack.count > startIndex, let prev = stack.lastElement, prev.end == range.start {
+            stack.replaceLast(ByteRange(start: prev.start, end: range.end))
+            return
+        }
+        stack.append(range)
+    }
+
+    @inline(__always)
+    private func makeTextContent(from stack: ScratchStack<ByteRange>, startIndex: Int) -> TextContent {
+        let count = stack.count - startIndex
+        if count <= 0 {
+            return .sequence(ByteRangeSequence([]))
+        }
+        if count == 1 {
+            return .bytes(stack.popLast())
+        }
+        return .sequence(ByteRangeSequence(stack.takeArray(from: startIndex)))
+    }
+
+    @inline(__always)
     private func characterFromMDChar(_ value: MD_CHAR) -> Character {
         Character(UnicodeScalar(UInt8(bitPattern: value)))
+    }
+
+    private func decodeEntity(_ text: UnsafePointer<MD_CHAR>?, size: MD_SIZE) -> String {
+        guard let range = pointerRange(text, size: size) else { return "" }
+        let start = Int(range.start - baseOffset)
+        let length = Int(range.end - range.start)
+        guard start >= 0, start + length <= dataCount else { return "" }
+        return basePointer.advanced(by: start).withMemoryRebound(to: UInt8.self, capacity: length) { u8Ptr in
+            let buf = UnsafeBufferPointer(start: u8Ptr, count: length)
+            if let decoded = EntityDecoder.decodeUTF8(buf) {
+                return decoded
+            }
+            return String(decoding: buf, as: UTF8.self)
+        }
     }
 
     // MARK: - Callbacks
@@ -202,59 +407,90 @@ private final class ParserContext {
 
         switch type {
         case MD_BLOCK_DOC:
-            context.blockStack = [.doc(blocks: [])]
+            context.blockStack.removeAll(keepingCapacity: true)
+            context.blockChildren.removeAllKeepingCapacity()
+            context.blockStack.append(BlockFrame(kind: .doc, childStart: 0))
+
         case MD_BLOCK_QUOTE:
-            context.blockStack.append(.blockQuote(blocks: []))
+            context.blockStack.append(BlockFrame(kind: .blockQuote, childStart: context.blockChildren.count))
+
         case MD_BLOCK_UL:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_UL_DETAIL.self)
             let isTight = info?.pointee.is_tight != 0
             let mark = info?.pointee.mark ?? MD_CHAR(45)
-            let list = BlockState.list(ordered: false, start: 1, delimiter: context.characterFromMDChar(mark), isTight: isTight, items: [])
-            context.blockStack.append(list)
+            context.blockStack.append(BlockFrame(
+                kind: .list(ordered: false, start: 1, delimiter: context.characterFromMDChar(mark), isTight: isTight),
+                childStart: context.listItems.count
+            ))
+
         case MD_BLOCK_OL:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_OL_DETAIL.self)
             let start = Int(info?.pointee.start ?? 1)
             let rawDelimiter = info?.pointee.mark_delimiter ?? MD_CHAR(46)
-            let delimiter = context.characterFromMDChar(rawDelimiter)
             let isTight = info?.pointee.is_tight != 0
-            let list = BlockState.list(ordered: true, start: start, delimiter: delimiter, isTight: isTight, items: [])
-            context.blockStack.append(list)
+            context.blockStack.append(BlockFrame(
+                kind: .list(ordered: true, start: start, delimiter: context.characterFromMDChar(rawDelimiter), isTight: isTight),
+                childStart: context.listItems.count
+            ))
+
         case MD_BLOCK_LI:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_LI_DETAIL.self)
             let isTask = info?.pointee.is_task != 0
             let mark = info?.pointee.task_mark
             let isChecked = (mark == MD_CHAR(120) || mark == MD_CHAR(88))
-            context.blockStack.append(.listItem(isTask: isTask, isChecked: isChecked, blocks: []))
+            context.blockStack.append(BlockFrame(
+                kind: .listItem(isTask: isTask, isChecked: isChecked),
+                childStart: context.blockChildren.count
+            ))
+
         case MD_BLOCK_HR:
-            context.blockStack.append(.thematicBreak)
+            context.blockStack.append(BlockFrame(kind: .thematicBreak, childStart: 0))
+
         case MD_BLOCK_H:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_H_DETAIL.self)
             let level = Int(info?.pointee.level ?? 1)
             context.beginInlineBlock()
-            context.blockStack.append(.heading(level: level))
+            context.blockStack.append(BlockFrame(kind: .heading(level: level), childStart: 0))
+
         case MD_BLOCK_P:
             context.beginInlineBlock()
-            context.blockStack.append(.paragraph)
+            context.blockStack.append(BlockFrame(kind: .paragraph, childStart: 0))
+
         case MD_BLOCK_CODE:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_CODE_DETAIL.self)
             let infoAttr = info.map { context.attributeContent($0.pointee.info) } ?? nil
             let langAttr = info.map { context.attributeContent($0.pointee.lang) } ?? nil
-            let fenceChar = info?.pointee.fence_char
-            let fence = fenceChar == 0 ? nil : context.characterFromMDChar(fenceChar!)
-            context.blockStack.append(.codeBlock(info: infoAttr, language: langAttr, fence: fence, contentRanges: []))
+            let fenceChar = info?.pointee.fence_char ?? 0
+            let fence = fenceChar == 0 ? nil : context.characterFromMDChar(fenceChar)
+            context.blockStack.append(BlockFrame(
+                kind: .codeBlock(info: infoAttr, language: langAttr, fence: fence),
+                childStart: context.textRanges.count
+            ))
+
         case MD_BLOCK_HTML:
-            context.blockStack.append(.htmlBlock(contentRanges: []))
+            context.blockStack.append(BlockFrame(
+                kind: .htmlBlock,
+                childStart: context.textRanges.count
+            ))
+
         case MD_BLOCK_TABLE:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_TABLE_DETAIL.self)
             let columnCount = Int(info?.pointee.col_count ?? 0)
-            let alignments = Array(repeating: TableAlignment.none, count: max(0, columnCount))
-            context.blockStack.append(.table(alignments: alignments, headerRows: [], bodyRows: []))
+            let alignments = Array(repeating: TableAlignment.none, count: Swift.max(0, columnCount))
+            context.blockStack.append(BlockFrame(
+                kind: .table(alignments: alignments, bodyRowStart: context.tableBodyRows.count),
+                childStart: context.tableHeaderRows.count
+            ))
+
         case MD_BLOCK_THEAD:
             context.tableSectionStack.append(.header)
+
         case MD_BLOCK_TBODY:
             context.tableSectionStack.append(.body)
+
         case MD_BLOCK_TR:
-            context.blockStack.append(.tableRow(cells: []))
+            context.blockStack.append(BlockFrame(kind: .tableRow, childStart: context.tableCells.count))
+
         case MD_BLOCK_TH, MD_BLOCK_TD:
             let info = detail?.assumingMemoryBound(to: MD_BLOCK_TD_DETAIL.self)
             let alignment: TableAlignment
@@ -269,7 +505,8 @@ private final class ParserContext {
                 alignment = .none
             }
             context.beginInlineBlock()
-            context.blockStack.append(.tableCell(alignment: alignment))
+            context.blockStack.append(BlockFrame(kind: .tableCell(alignment: alignment), childStart: 0))
+
         default:
             break
         }
@@ -283,88 +520,117 @@ private final class ParserContext {
 
         switch type {
         case MD_BLOCK_QUOTE:
-            guard case .blockQuote(let blocks) = context.blockStack.popLast() else { return 0 }
-            let range = rangeFromBlocks(blocks)
+            guard let frame = context.blockStack.popLast(), case .blockQuote = frame.kind else { return 0 }
+            let blocks = context.blockChildren.takeArray(from: frame.childStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .blockQuote, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.blockQuote(BlockQuoteBlock(id: id, blocks: blocks)))
+
         case MD_BLOCK_UL, MD_BLOCK_OL:
-            guard case .list(let ordered, let start, let delimiter, let isTight, let items) = context.blockStack.popLast() else { return 0 }
-            let range = rangeFromListItems(items)
+            guard let frame = context.blockStack.popLast(),
+                  case .list(let ordered, let start, let delimiter, let isTight) = frame.kind else { return 0 }
+            let items = context.listItems.takeArray(from: frame.childStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .list, range: range)
-            let list = ListBlock(id: id, ordered: ordered, start: start, delimiter: delimiter, isTight: isTight, items: items)
-            context.appendBlock(.list(list))
+            context.propagateRangeToParent(frame)
+            context.appendBlock(.list(ListBlock(
+                id: id,
+                ordered: ordered,
+                start: start,
+                delimiter: delimiter,
+                isTight: isTight,
+                items: items
+            )))
+
         case MD_BLOCK_LI:
-            guard case .listItem(let isTask, let isChecked, let blocks) = context.blockStack.popLast() else { return 0 }
-            let range = rangeFromBlocks(blocks)
+            guard let frame = context.blockStack.popLast(),
+                  case .listItem(let isTask, let isChecked) = frame.kind else { return 0 }
+            let blocks = context.blockChildren.takeArray(from: frame.childStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .listItem, range: range)
-            let item = ListItemBlock(id: id, blocks: blocks, isTask: isTask, isChecked: isChecked)
-            if let listIndex = context.blockStack.lastIndex(where: { if case .list = $0 { return true } else { return false } }) {
-                if case .list(let ordered, let start, let delimiter, let isTight, let items) = context.blockStack[listIndex] {
-                    context.blockStack[listIndex] = .list(ordered: ordered, start: start, delimiter: delimiter, isTight: isTight, items: items + [item])
-                }
-            }
+            context.propagateRangeToParent(frame)
+            context.listItems.append(ListItemBlock(id: id, blocks: blocks, isTask: isTask, isChecked: isChecked))
+
         case MD_BLOCK_HR:
-            _ = context.blockStack.popLast()
-            let range = ByteRange(start: 0, end: 0)
+            guard let frame = context.blockStack.popLast() else { return 0 }
+            let range = ByteRange(start: context.baseOffset, end: context.baseOffset)
             let id = context.nextID(kind: .thematicBreak, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.thematicBreak(ThematicBreakBlock(id: id, range: range)))
+
         case MD_BLOCK_H:
-            guard case .heading(let level) = context.blockStack.popLast() else { return 0 }
+            guard let frame = context.blockStack.popLast(),
+                  case .heading(let level) = frame.kind else { return 0 }
             let spans = context.endInlineBlock()
-            let range = context.computeRange(from: spans)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .heading, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.heading(HeadingBlock(id: id, level: level, spans: spans, range: range)))
+
         case MD_BLOCK_P:
-            guard case .paragraph = context.blockStack.popLast() else { return 0 }
+            guard let frame = context.blockStack.popLast(),
+                  case .paragraph = frame.kind else { return 0 }
             let spans = context.endInlineBlock()
-            let range = context.computeRange(from: spans)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .paragraph, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.paragraph(ParagraphBlock(id: id, spans: spans, range: range)))
+
         case MD_BLOCK_CODE:
-            guard case .codeBlock(let info, let language, let fence, let ranges) = context.blockStack.popLast() else { return 0 }
-            let content = TextContent.sequence(ByteRangeSequence(ranges))
-            let range = mergeRanges(ranges)
+            guard let frame = context.blockStack.popLast(),
+                  case .codeBlock(let info, let language, let fence) = frame.kind else { return 0 }
+            let content = context.makeTextContent(from: context.textRanges, startIndex: frame.childStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .codeBlock, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.codeBlock(CodeBlock(id: id, info: info, language: language, content: content, fence: fence)))
+
         case MD_BLOCK_HTML:
-            guard case .htmlBlock(let ranges) = context.blockStack.popLast() else { return 0 }
-            let content = TextContent.sequence(ByteRangeSequence(ranges))
-            let range = mergeRanges(ranges)
+            guard let frame = context.blockStack.popLast(),
+                  case .htmlBlock = frame.kind else { return 0 }
+            let content = context.makeTextContent(from: context.textRanges, startIndex: frame.childStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .htmlBlock, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.htmlBlock(HTMLBlock(id: id, content: content)))
+
         case MD_BLOCK_TABLE:
-            guard case .table(let alignments, let headerRows, let bodyRows) = context.blockStack.popLast() else { return 0 }
-            let range = rangeFromTable(headerRows: headerRows, bodyRows: bodyRows)
+            guard let frame = context.blockStack.popLast(),
+                  case .table(let alignments, let bodyRowStart) = frame.kind else { return 0 }
+            let headerRows = context.tableHeaderRows.takeArray(from: frame.childStart)
+            let bodyRows = context.tableBodyRows.takeArray(from: bodyRowStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .table, range: range)
+            context.propagateRangeToParent(frame)
             context.appendBlock(.table(TableBlock(id: id, alignments: alignments, headerRows: headerRows, bodyRows: bodyRows)))
+
         case MD_BLOCK_THEAD, MD_BLOCK_TBODY:
             _ = context.tableSectionStack.popLast()
+
         case MD_BLOCK_TR:
-            guard case .tableRow(let cells) = context.blockStack.popLast() else { return 0 }
-            let range = rangeFromTableCells(cells)
+            guard let frame = context.blockStack.popLast(),
+                  case .tableRow = frame.kind else { return 0 }
+            let cells = context.tableCells.takeArray(from: frame.childStart)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .tableRow, range: range)
             let row = TableRow(id: id, cells: cells)
-            if let tableIndex = context.blockStack.lastIndex(where: { if case .table = $0 { return true } else { return false } }) {
-                if case .table(let alignments, let headerRows, let bodyRows) = context.blockStack[tableIndex] {
-                    switch context.tableSectionStack.last {
-                    case .header:
-                        context.blockStack[tableIndex] = .table(alignments: alignments, headerRows: headerRows + [row], bodyRows: bodyRows)
-                    default:
-                        context.blockStack[tableIndex] = .table(alignments: alignments, headerRows: headerRows, bodyRows: bodyRows + [row])
-                    }
-                }
+            context.propagateRangeToParent(frame)
+            if context.tableSectionStack.last == .header {
+                context.tableHeaderRows.append(row)
+            } else {
+                context.tableBodyRows.append(row)
             }
+
         case MD_BLOCK_TH, MD_BLOCK_TD:
-            guard case .tableCell(let alignment) = context.blockStack.popLast() else { return 0 }
+            guard let frame = context.blockStack.popLast(),
+                  case .tableCell(let alignment) = frame.kind else { return 0 }
             let spans = context.endInlineBlock()
-            let range = context.computeRange(from: spans)
+            let range = frame.resolvedRange
             let id = context.nextID(kind: .tableCell, range: range)
-            let cell = TableCell(id: id, spans: spans, alignment: alignment)
-            if let rowIndex = context.blockStack.lastIndex(where: { if case .tableRow = $0 { return true } else { return false } }) {
-                if case .tableRow(let cells) = context.blockStack[rowIndex] {
-                    context.blockStack[rowIndex] = .tableRow(cells: cells + [cell])
-                }
-            }
+            context.propagateRangeToParent(frame)
+            context.tableCells.append(TableCell(id: id, spans: spans, alignment: alignment))
+
         default:
             break
         }
@@ -376,74 +642,84 @@ private final class ParserContext {
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
 
-        let container: SpanContainer
+        let kind: SpanKind
         switch type {
         case MD_SPAN_EM:
-            container = SpanContainer(kind: .emphasis)
+            kind = .emphasis
         case MD_SPAN_STRONG:
-            container = SpanContainer(kind: .strong)
+            kind = .strong
         case MD_SPAN_A:
             let info = detail?.assumingMemoryBound(to: MD_SPAN_A_DETAIL.self)
             let destination = info.map { context.attributeContent($0.pointee.href) } ?? nil
             let title = info.map { context.attributeContent($0.pointee.title) } ?? nil
-            container = SpanContainer(kind: .link, destination: destination, title: title)
+            if case .bytes(let r) = destination { context.recordRangeOnTopBlock(r) }
+            if case .bytes(let r) = title { context.recordRangeOnTopBlock(r) }
+            kind = .link(destination: destination, title: title)
         case MD_SPAN_IMG:
             let info = detail?.assumingMemoryBound(to: MD_SPAN_IMG_DETAIL.self)
             let source = info.map { context.attributeContent($0.pointee.src) } ?? nil
             let title = info.map { context.attributeContent($0.pointee.title) } ?? nil
-            container = SpanContainer(kind: .image, title: title, source: source)
+            if case .bytes(let r) = source { context.recordRangeOnTopBlock(r) }
+            if case .bytes(let r) = title { context.recordRangeOnTopBlock(r) }
+            kind = .image(source: source, title: title)
         case MD_SPAN_CODE:
-            container = SpanContainer(kind: .code)
+            kind = .code
         case MD_SPAN_DEL:
-            container = SpanContainer(kind: .strikethrough)
+            kind = .strikethrough
         case MD_SPAN_WIKILINK:
             let info = detail?.assumingMemoryBound(to: MD_SPAN_WIKILINK_DETAIL.self)
             let target = info.map { context.attributeContent($0.pointee.target) } ?? nil
-            container = SpanContainer(kind: .wikiLink, wikiTarget: target)
+            if case .bytes(let r) = target { context.recordRangeOnTopBlock(r) }
+            kind = .wikiLink(target: target)
         case MD_SPAN_LATEXMATH:
-            container = SpanContainer(kind: .latexInline)
+            kind = .latexInline
         case MD_SPAN_LATEXMATH_DISPLAY:
-            container = SpanContainer(kind: .latexDisplay)
+            kind = .latexDisplay
         case MD_SPAN_U:
-            container = SpanContainer(kind: .underline)
+            kind = .underline
         default:
-            container = SpanContainer(kind: .emphasis)
+            kind = .emphasis
         }
 
-        context.inlineStack.append(container)
+        context.spanStack.append(SpanFrame(
+            kind: kind,
+            childStart: context.spanChildren.count,
+            codeRangeStart: context.inlineCodeRanges.count
+        ))
         return 0
     }
 
-    static let leaveSpanCallback: @convention(c) (MD_SPANTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { type, _, userdata in
+    static let leaveSpanCallback: @convention(c) (MD_SPANTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { _, _, userdata in
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
-        guard let container = context.inlineStack.popLast() else { return 0 }
+        guard let frame = context.spanStack.popLast() else { return 0 }
+
+        let children = context.spanChildren.takeArray(from: frame.childStart)
 
         let span: MarkdownSpan
-        switch container.kind {
+        switch frame.kind {
         case .emphasis:
-            span = .emphasis(container.children)
+            span = .emphasis(children)
         case .strong:
-            span = .strong(container.children)
+            span = .strong(children)
         case .strikethrough:
-            span = .strikethrough(container.children)
+            span = .strikethrough(children)
         case .underline:
-            span = .underline(container.children)
-        case .link:
-            span = .link(children: container.children, destination: container.destination, title: container.title)
-        case .image:
-            span = .image(alt: container.children, source: container.source, title: container.title)
+            span = .underline(children)
+        case .link(let destination, let title):
+            span = .link(children: children, destination: destination, title: title)
+        case .image(let source, let title):
+            span = .image(alt: children, source: source, title: title)
         case .code:
-            let content = container.codeContent(from: context.sourceData)
+            let content = context.resolveCodeSpanContent(codeRangeStart: frame.codeRangeStart, fallbackChildren: children)
             span = .code(content)
-        case .wikiLink:
-            let target = container.wikiTarget ?? .string("")
-            span = .wikiLink(target: target, children: container.children)
+        case .wikiLink(let target):
+            span = .wikiLink(target: target ?? .string(""), children: children)
         case .latexInline:
-            let content = container.codeContent(from: context.sourceData)
+            let content = context.resolveCodeSpanContent(codeRangeStart: frame.codeRangeStart, fallbackChildren: children)
             span = .latexInline(content)
         case .latexDisplay:
-            let content = container.codeContent(from: context.sourceData)
+            let content = context.resolveCodeSpanContent(codeRangeStart: frame.codeRangeStart, fallbackChildren: children)
             span = .latexDisplay(content)
         case .root:
             return 0
@@ -453,89 +729,116 @@ private final class ParserContext {
         return 0
     }
 
+    private func resolveCodeSpanContent(codeRangeStart: Int, fallbackChildren: [MarkdownSpan]) -> TextContent {
+        if codeRangeStart < inlineCodeRanges.count {
+            return makeTextContent(from: inlineCodeRanges, startIndex: codeRangeStart)
+        }
+        guard !fallbackChildren.isEmpty else { return .string("") }
+        var text = ""
+        for span in fallbackChildren {
+            switch span {
+            case .text(let content):
+                switch content {
+                case .bytes(let r):
+                    let start = Int(r.start - baseOffset)
+                    let length = Int(r.end - r.start)
+                    if start >= 0, start + length <= dataCount {
+                        basePointer.advanced(by: start).withMemoryRebound(to: UInt8.self, capacity: length) { ptr in
+                            text += String(decoding: UnsafeBufferPointer(start: ptr, count: length), as: UTF8.self)
+                        }
+                    }
+                case .string(let s):
+                    text += s
+                case .sequence(let seq):
+                    for r in seq.ranges {
+                        let start = Int(r.start - baseOffset)
+                        let length = Int(r.end - r.start)
+                        if start >= 0, start + length <= dataCount {
+                            basePointer.advanced(by: start).withMemoryRebound(to: UInt8.self, capacity: length) { ptr in
+                                text += String(decoding: UnsafeBufferPointer(start: ptr, count: length), as: UTF8.self)
+                            }
+                        }
+                    }
+                }
+            case .softBreak, .lineBreak:
+                text += "\n"
+            default:
+                break
+            }
+        }
+        return .string(text)
+    }
+
     static let textCallback: @convention(c) (MD_TEXTTYPE, UnsafePointer<MD_CHAR>?, MD_SIZE, UnsafeMutableRawPointer?) -> Int32 = { type, text, size, userdata in
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
 
-        func appendInline(_ content: TextContent) {
-            if context.inlineStack.isEmpty {
-                return
-            }
-            context.addInlineText(content)
-        }
-
         switch type {
-        case MD_TEXT_NULLCHAR:
-            appendInline(.string("\u{FFFD}"))
-        case MD_TEXT_BR:
-            context.appendSpan(.lineBreak)
-        case MD_TEXT_SOFTBR:
-            context.appendSpan(.softBreak)
-        case MD_TEXT_ENTITY:
-            let entity = context.stringFromPointer(text, size: size)
-            let decoded = EntityDecoder.decode(entity)
-            appendInline(.string(decoded))
+        case MD_TEXT_NORMAL:
+            if let range = context.pointerRange(text, size: size) {
+                context.appendInlineByteRange(range)
+            }
+
         case MD_TEXT_CODE:
             if let range = context.pointerRange(text, size: size) {
-                if let last = context.inlineStack.last, last.kind == .code || last.kind == .latexInline || last.kind == .latexDisplay {
-                    context.inlineStack[context.inlineStack.count - 1].codeSegments.append(.bytes(range))
-                } else if context.appendCodeBlockText(range) {
-                    return 0
+                context.recordRangeOnTopBlock(range)
+                if let topSpan = context.spanStack.last, topSpan.isCodeLike {
+                    context.appendCoalescedRange(to: context.inlineCodeRanges, startIndex: topSpan.codeRangeStart, range: range)
+                } else if let topBlock = context.blockStack.last, case .codeBlock = topBlock.kind {
+                    context.appendCoalescedRange(to: context.textRanges, startIndex: topBlock.childStart, range: range)
                 } else {
-                    context.addInlineCode(.bytes(range))
+                    context.appendSpan(.code(.bytes(range)))
                 }
             }
+
+        case MD_TEXT_SOFTBR:
+            context.appendSpan(.softBreak)
+
+        case MD_TEXT_BR:
+            context.appendSpan(.lineBreak)
+
+        case MD_TEXT_ENTITY:
+            if !context.spanStack.isEmpty {
+                let decoded = context.decodeEntity(text, size: size)
+                context.appendSpan(.text(.string(decoded)))
+            }
+
+        case MD_TEXT_NULLCHAR:
+            if !context.spanStack.isEmpty {
+                context.appendSpan(.text(.string("\u{FFFD}")))
+            }
+
         case MD_TEXT_HTML:
             if let range = context.pointerRange(text, size: size) {
-                if context.appendHTMLBlockText(range) {
-                    return 0
+                context.recordRangeOnTopBlock(range)
+                if let topBlock = context.blockStack.last, case .htmlBlock = topBlock.kind {
+                    context.appendCoalescedRange(to: context.textRanges, startIndex: topBlock.childStart, range: range)
+                } else {
+                    context.appendSpan(.html(.bytes(range)))
                 }
-                context.addInlineHTML(.bytes(range))
             }
+
         case MD_TEXT_LATEXMATH:
             if let range = context.pointerRange(text, size: size) {
-                if let last = context.inlineStack.last, last.kind == .latexInline || last.kind == .latexDisplay {
-                    context.inlineStack[context.inlineStack.count - 1].codeSegments.append(.bytes(range))
+                context.recordRangeOnTopBlock(range)
+                if let topSpan = context.spanStack.last, topSpan.isLatexLike {
+                    context.appendCoalescedRange(to: context.inlineCodeRanges, startIndex: topSpan.codeRangeStart, range: range)
                 } else {
-                    context.addInlineText(.bytes(range))
+                    context.appendInlineByteRange(range)
                 }
             }
+
         default:
             if let range = context.pointerRange(text, size: size) {
-                appendInline(.bytes(range))
+                context.appendInlineByteRange(range)
             }
         }
 
         return 0
     }
-
-    static let debugLogCallback: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { _, _ in }
-
-    private func stringFromPointer(_ text: UnsafePointer<MD_CHAR>?, size: MD_SIZE) -> String {
-        // Reuse pointerRange so all pointer→offset math shares the same bounds checks.
-        guard let range = pointerRange(text, size: size) else { return "" }
-        let slice = sourceData[Int(range.start)..<Int(range.end)]
-        return String(decoding: slice, as: UTF8.self)
-    }
-
-    private func appendCodeBlockText(_ range: ByteRange) -> Bool {
-        guard let topIndex = blockStack.indices.last,
-              case .codeBlock(let info, let language, let fence, let ranges) = blockStack[topIndex] else {
-            return false
-        }
-        blockStack[topIndex] = .codeBlock(info: info, language: language, fence: fence, contentRanges: ranges + [range])
-        return true
-    }
-
-    private func appendHTMLBlockText(_ range: ByteRange) -> Bool {
-        guard let topIndex = blockStack.indices.last,
-              case .htmlBlock(let ranges) = blockStack[topIndex] else {
-            return false
-        }
-        blockStack[topIndex] = .htmlBlock(contentRanges: ranges + [range])
-        return true
-    }
 }
+
+// MARK: - Compact Stack Frame Types
 
 private enum BlockKind: UInt8 {
     case paragraph = 1
@@ -556,27 +859,55 @@ private enum TableSection {
     case body
 }
 
-private enum BlockState {
-    case doc(blocks: [MarkdownBlock])
-    case blockQuote(blocks: [MarkdownBlock])
-    case list(ordered: Bool, start: Int, delimiter: Character?, isTight: Bool, items: [ListItemBlock])
-    case listItem(isTask: Bool, isChecked: Bool, blocks: [MarkdownBlock])
+private enum BlockFrameKind {
+    case doc
+    case blockQuote
+    case list(ordered: Bool, start: Int, delimiter: Character?, isTight: Bool)
+    case listItem(isTask: Bool, isChecked: Bool)
     case paragraph
     case heading(level: Int)
-    case codeBlock(info: TextContent?, language: TextContent?, fence: Character?, contentRanges: [ByteRange])
-    case htmlBlock(contentRanges: [ByteRange])
-    case table(alignments: [TableAlignment], headerRows: [TableRow], bodyRows: [TableRow])
-    case tableRow(cells: [TableCell])
+    case codeBlock(info: TextContent?, language: TextContent?, fence: Character?)
+    case htmlBlock
+    case table(alignments: [TableAlignment], bodyRowStart: Int)
+    case tableRow
     case tableCell(alignment: TableAlignment)
     case thematicBreak
+}
 
-    var acceptsChildBlocks: Bool {
-        switch self {
-        case .doc, .blockQuote, .listItem:
-            return true
-        default:
-            return false
+private struct BlockFrame {
+    let kind: BlockFrameKind
+    let childStart: Int
+    var minStart: UInt32 = 0
+    var maxEnd: UInt32 = 0
+    var hasRange: Bool = false
+
+    @inline(__always)
+    mutating func include(_ range: ByteRange) {
+        if hasRange {
+            if range.start < minStart { minStart = range.start }
+            if range.end > maxEnd { maxEnd = range.end }
+        } else {
+            minStart = range.start
+            maxEnd = range.end
+            hasRange = true
         }
+    }
+
+    @inline(__always)
+    mutating func include(minStart: UInt32, maxEnd: UInt32) {
+        if hasRange {
+            if minStart < self.minStart { self.minStart = minStart }
+            if maxEnd > self.maxEnd { self.maxEnd = maxEnd }
+        } else {
+            self.minStart = minStart
+            self.maxEnd = maxEnd
+            hasRange = true
+        }
+    }
+
+    @inline(__always)
+    var resolvedRange: ByteRange {
+        hasRange ? ByteRange(start: minStart, end: maxEnd) : ByteRange(start: 0, end: 0)
     }
 }
 
@@ -584,175 +915,38 @@ private enum SpanKind {
     case root
     case emphasis
     case strong
-    case link
-    case image
+    case link(destination: TextContent?, title: TextContent?)
+    case image(source: TextContent?, title: TextContent?)
     case code
     case strikethrough
     case underline
-    case wikiLink
+    case wikiLink(target: TextContent?)
     case latexInline
     case latexDisplay
 }
 
-private struct SpanContainer {
+private struct SpanFrame {
     let kind: SpanKind
-    var children: [MarkdownSpan]
-    var destination: TextContent?
-    var title: TextContent?
-    var source: TextContent?
-    var wikiTarget: TextContent?
-    var codeSegments: [TextContent]
+    let childStart: Int
+    let codeRangeStart: Int
 
-    init(kind: SpanKind, destination: TextContent? = nil, title: TextContent? = nil, source: TextContent? = nil, wikiTarget: TextContent? = nil) {
-        self.kind = kind
-        self.children = []
-        self.destination = destination
-        self.title = title
-        self.source = source
-        self.wikiTarget = wikiTarget
-        self.codeSegments = []
-    }
-
-    func codeContent(from data: Data) -> TextContent {
-        if !codeSegments.isEmpty {
-            return .sequence(ByteRangeSequence(codeSegments.compactMap { content in
-                if case .bytes(let range) = content {
-                    return range
-                }
-                return nil
-            }))
-        }
-
-        let text = children.compactMap { span -> String? in
-            switch span {
-            case .text(let content):
-                return content.string(in: data)
-            case .softBreak:
-                return "\n"
-            case .lineBreak:
-                return "\n"
-            default:
-                return nil
-            }
-        }.joined()
-        return .string(text)
-    }
-}
-
-private func rangeFromBlocks(_ blocks: [MarkdownBlock]) -> ByteRange {
-    let ranges = blocks.compactMap { block -> ByteRange? in
-        switch block {
-        case .paragraph(let block):
-            return block.range
-        case .heading(let block):
-            return block.range
-        case .codeBlock(let block):
-            if case .sequence(let ranges) = block.content {
-                return mergeRanges(ranges.ranges)
-            }
-            return nil
-        case .htmlBlock(let block):
-            if case .sequence(let ranges) = block.content {
-                return mergeRanges(ranges.ranges)
-            }
-            return nil
-        case .blockQuote(let block):
-            return rangeFromBlocks(block.blocks)
-        case .list(let block):
-            return rangeFromListItems(block.items)
-        case .table(let block):
-            return rangeFromTable(headerRows: block.headerRows, bodyRows: block.bodyRows)
-        case .thematicBreak(let block):
-            return block.range
+    @inline(__always)
+    var isCodeLike: Bool {
+        switch kind {
+        case .code, .latexInline, .latexDisplay:
+            return true
+        default:
+            return false
         }
     }
-    return mergeRanges(ranges)
-}
 
-private func rangeFromListItems(_ items: [ListItemBlock]) -> ByteRange {
-    let ranges = items.compactMap { item in
-        rangeFromBlocks(item.blocks)
-    }
-    return mergeRanges(ranges)
-}
-
-private func rangeFromTable(headerRows: [TableRow], bodyRows: [TableRow]) -> ByteRange {
-    let rows = headerRows + bodyRows
-    let ranges = rows.map { rangeFromTableCells($0.cells) }
-    return mergeRanges(ranges)
-}
-
-private func rangeFromTableCells(_ cells: [TableCell]) -> ByteRange {
-    let ranges = cells.map { cell in
-        let spans = cell.spans
-        var minStart: UInt32?
-        var maxEnd: UInt32?
-        for span in spans {
-            span.walkByteRanges { range in
-                if minStart == nil || range.start < minStart! { minStart = range.start }
-                if maxEnd == nil || range.end > maxEnd! { maxEnd = range.end }
-            }
-        }
-        if let minStart, let maxEnd {
-            return ByteRange(start: minStart, end: maxEnd)
-        }
-        return ByteRange(start: 0, end: 0)
-    }
-    return mergeRanges(ranges)
-}
-
-private func mergeRanges(_ ranges: [ByteRange]) -> ByteRange {
-    guard !ranges.isEmpty else { return ByteRange(start: 0, end: 0) }
-    var minStart = ranges[0].start
-    var maxEnd = ranges[0].end
-    for range in ranges {
-        if range.start < minStart { minStart = range.start }
-        if range.end > maxEnd { maxEnd = range.end }
-    }
-    return ByteRange(start: minStart, end: maxEnd)
-}
-
-private extension MarkdownSpan {
-    func walkByteRanges(_ visit: (ByteRange) -> Void) {
-        switch self {
-        case .text(let content):
-            if case .bytes(let range) = content { visit(range) }
-            if case .sequence(let sequence) = content {
-                for range in sequence.ranges { visit(range) }
-            }
-        case .code(let content), .html(let content), .latexInline(let content), .latexDisplay(let content):
-            if case .bytes(let range) = content { visit(range) }
-            if case .sequence(let sequence) = content {
-                for range in sequence.ranges { visit(range) }
-            }
-        case .emphasis(let children), .strong(let children), .strikethrough(let children), .underline(let children):
-            children.forEach { $0.walkByteRanges(visit) }
-        case .link(let children, let destination, let title):
-            children.forEach { $0.walkByteRanges(visit) }
-            if let destination {
-                if case .bytes(let range) = destination { visit(range) }
-                if case .sequence(let ranges) = destination { ranges.ranges.forEach(visit) }
-            }
-            if let title {
-                if case .bytes(let range) = title { visit(range) }
-                if case .sequence(let ranges) = title { ranges.ranges.forEach(visit) }
-            }
-        case .image(let alt, let source, let title):
-            alt.forEach { $0.walkByteRanges(visit) }
-            if let source {
-                if case .bytes(let range) = source { visit(range) }
-                if case .sequence(let ranges) = source { ranges.ranges.forEach(visit) }
-            }
-            if let title {
-                if case .bytes(let range) = title { visit(range) }
-                if case .sequence(let ranges) = title { ranges.ranges.forEach(visit) }
-            }
-        case .wikiLink(let target, let children):
-            children.forEach { $0.walkByteRanges(visit) }
-            if case .bytes(let range) = target { visit(range) }
-            if case .sequence(let ranges) = target { ranges.ranges.forEach(visit) }
-        case .lineBreak, .softBreak:
-            break
+    @inline(__always)
+    var isLatexLike: Bool {
+        switch kind {
+        case .latexInline, .latexDisplay:
+            return true
+        default:
+            return false
         }
     }
 }

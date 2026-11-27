@@ -17,4 +17,16 @@ public enum TextContent: Sendable, Equatable {
             return ranges.string(in: data)
         }
     }
+
+    @inlinable
+    internal func string(in buffer: UnsafeRawBufferPointer) -> String {
+        switch self {
+        case .bytes(let range):
+            return range.string(in: buffer)
+        case .string(let value):
+            return value
+        case .sequence(let ranges):
+            return ranges.string(in: buffer)
+        }
+    }
 }

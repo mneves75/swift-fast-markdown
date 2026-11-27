@@ -27,9 +27,14 @@ struct CodeBlockView: View {
         }
         .liquidGlassSurface(cornerRadius: 12)
         .task(id: block.id) {
+            let code = block.content.string(in: source)
+            guard !code.isEmpty else {
+                highlighted = AttributedString()
+                return
+            }
             isHighlighting = true
             let language = block.language?.string(in: source)
-            highlighted = await highlighter.highlight(code: block.content.string(in: source), language: language)
+            highlighted = await highlighter.highlight(code: code, language: language)
             isHighlighting = false
         }
     }

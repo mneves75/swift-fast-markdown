@@ -15,7 +15,7 @@ private typealias PlatformFont = NSFont
 // the thread safety, not the type itself.
 
 public actor HighlightrEngine: SyntaxHighlighting {
-    public struct Configuration: Sendable {
+    public struct Configuration: Sendable, Hashable {
         public var theme: String
         public var fontName: String?
         public var fontSize: CGFloat?

@@ -72,6 +72,15 @@ struct LRUCache<Key: Hashable, Value> {
         }
     }
 
+    /// Removes the entry for a specific key, if present.
+    /// - Complexity: O(1)
+    @discardableResult
+    mutating func removeValue(for key: Key) -> Value? {
+        guard let node = storage.removeValue(forKey: key) else { return nil }
+        removeNode(node)
+        return node.value
+    }
+
     /// Removes all entries from the cache.
     /// - Complexity: O(n)
     mutating func removeAll() {

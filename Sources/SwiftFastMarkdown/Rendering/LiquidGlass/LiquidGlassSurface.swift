@@ -45,12 +45,11 @@ struct GlassEffectContainer<Content: View>: View {
     @available(iOS 26, macOS 26, *)
     @ViewBuilder
     private var glassEffectContainerView: some View {
-        // On iOS 26+, glass surfaces automatically blend when in the same
-        // compositingGroup. The container provides proper layering context.
-        VStack(alignment: .leading, spacing: spacing) {
+        // Delegate to SwiftUI's native GlassEffectContainer instead of forcing
+        // an offscreen `.compositingGroup()` rasterization on large documents.
+        SwiftUI.GlassEffectContainer(spacing: spacing) {
             content()
         }
-        .compositingGroup()
     }
 }
 

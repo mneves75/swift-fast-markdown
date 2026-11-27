@@ -39,8 +39,9 @@ swift run -c release SwiftFastMarkdownBenchmarks   # benchmarks
 - **Pointer math** goes through `MD4CParser.pointerRange` (bounds-checked).
 - **Byte-range offsetting** lives once in `BlockOffsetter` — don't duplicate it.
 - **Read `IncrementalState` via `snapshot()`** (single lock, no torn reads).
-- **AttributedString**: append to one accumulator, reuse cached static constants,
-  avoid `a + b` concatenation in hot paths.
+- **AttributedString**: preserve the single-pass UTF-8 builder + prebuilt
+  `StylePalette` + POD `RunPatch` pipeline (avoid per-span `AttributedString`
+  allocations and `a + b` concatenation in hot paths).
 - **Bug fixes start with a failing test.** Keep `swift test` green.
 
 ## Keep docs in sync

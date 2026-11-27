@@ -19,9 +19,14 @@ public struct FastMarkdownText: View {
         _attributed = State(initialValue: AttributedString())
     }
 
+    private struct RenderKey: Hashable {
+        let documentID: UUID
+        let style: MarkdownStyle
+    }
+
     public var body: some View {
         Text(attributed)
-            .task(id: document.id) {
+            .task(id: RenderKey(documentID: document.id, style: style)) {
                 attributed = renderer.render(document, style: style)
             }
     }
