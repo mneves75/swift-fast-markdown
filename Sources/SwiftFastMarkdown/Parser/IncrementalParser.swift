@@ -5,7 +5,7 @@ import Foundation
 /// Instead of re-parsing the entire document on every chunk, `IncrementalMarkdownParser`:
 /// 1. Appends incoming bytes into a single contiguous `sourceData: Data` buffer (bounded by `MD4CParser.maxInputByteCount`).
 /// 2. Parses only the uncommitted pending suffix (`stableEndOffset ..< sourceData.count`) once via `MD4CParser.parseSlice(..., baseOffset:startingOrdinal:scratch:)`.
-/// 3. Stabilizes completed top-level blocks directly from `md4c`'s own AST whenever a subsequent top-level block (`.paragraph`, `.heading`, `.blockQuote`, or `.table`) begins on a line immediately preceded by a blank line and terminated by `\n` — guaranteeing block-structure parity with full `md4c` parsing across nested containers, fenced code blocks, and HTML blocks without maintaining a duplicate CommonMark state machine (note: link reference definitions spanning separate stabilized chunks require full-document parsing).
+/// 3. Stabilizes completed top-level blocks directly from `md4c`'s own AST whenever a subsequent top-level block (`.paragraph`, `.heading`, `.blockQuote`, or `.table`) begins on a line immediately preceded by a blank line and terminated by a CommonMark §2.2 line ending (`\n`, `\r\n`, or bare `\r` followed by another byte) — guaranteeing block-structure parity with full `md4c` parsing across nested containers, fenced code blocks, and HTML blocks without maintaining a duplicate CommonMark state machine (note: link reference definitions spanning separate stabilized chunks require full-document parsing).
 /// 4. Replaces only the uncommitted pending suffix in `cachedBlocks` in place (O(1) when uniquely referenced, CoW-isolated if the caller retains an earlier snapshot).
 public final class IncrementalMarkdownParser: Sendable {
 
@@ -285,9 +285,10 @@ private final class IncrementalState: @unchecked Sendable {
     /// Returns the column-0 byte offset where `block` starts if and only if:
     /// 1. `block` is a top-level `.paragraph`, `.heading`, `.blockQuote`, or `.table`
     ///    (block kinds that cannot contain an unquoted blank line before their first text byte).
-    /// 2. `block`'s first line is already terminated by `\n` (via SIMD `memchr`), so subsequent
-    ///    chunks cannot turn an incomplete prefix like `"2"` into a continuation marker `"2. "`.
-    /// 3. The line immediately preceding `cut` is blank (`0x20`/`0x09` only, CRLF-aware), which
+    /// 2. `block`'s first line is already terminated by a CommonMark §2.2 line ending
+    ///    (`\n`, `\r\n`, or bare `\r` followed by another byte so split CRLF waits),
+    ///    so subsequent chunks cannot turn an incomplete prefix like `"2"` into `"2. "`.
+    /// 3. The line immediately preceding `cut` is blank (`0x20`/`0x09` only, LF/CRLF/bare-CR aware), which
     ///    guarantees `md4c` was at top-level blank state at `cut` (`n_containers == 0`, outside
     ///    every fenced code block, indented code block, HTML block, list, and blockquote).
     /// 4. For `.blockQuote`, `cut` begins with 0–3 columns of whitespace followed by `>`.

@@ -293,7 +293,7 @@ private struct SinglePassBuilder {
 
     mutating func emitDocument(_ blocks: [MarkdownBlock]) {
         let blockCount = blocks.count
-        let newlineCount = max(1, style.blockSpacing)
+        let newlineCount = min(Self.maxIndentSpaces, max(1, style.blockSpacing))
         for index in 0..<blockCount {
             emitBlock(blocks[index], indentLevel: 0, depth: 0)
             if index < blockCount - 1 {
@@ -307,8 +307,8 @@ private struct SinglePassBuilder {
             emitBlockIteratively(block, indentLevel: indentLevel)
             return
         }
-        let clampedIndent = min(indentLevel, Self.maxIndentSpaces)
-        let indentStep = max(0, style.listIndent)
+        let clampedIndent = min(Self.maxIndentSpaces, max(0, indentLevel))
+        let indentStep = min(Self.maxIndentSpaces, max(0, style.listIndent))
         switch block {
         case .paragraph(let paragraph):
             if clampedIndent > 0 {

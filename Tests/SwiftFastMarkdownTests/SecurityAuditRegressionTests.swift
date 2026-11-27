@@ -510,5 +510,16 @@ struct SecurityAuditRegressionTests {
         #expect(entityList.items[0].id.start > 0)
         #expect(entityList.items[1].id.end > entityList.items[1].id.start)
         #expect(entityList.items[1].id.start > entityList.items[0].id.end)
+
+        // Extreme style values (Int.max listIndent / blockSpacing) must clamp before addition without trapping
+        var extremeStyle = MarkdownStyle.default
+        extremeStyle.listIndent = Int.max
+        extremeStyle.blockSpacing = Int.max
+        let extremeDoc = try MarkdownParser().parse("> > nested quote\n\n- a\n  - b\n")
+        let extremeOut = AttributedStringRenderer().render(extremeDoc, style: extremeStyle)
+        let extremeText = String(extremeOut.characters)
+        #expect(extremeText.contains("nested quote"))
+        #expect(extremeText.contains("b"))
+        #expect(extremeText.count < 512)
     }
 }
