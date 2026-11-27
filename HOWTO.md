@@ -421,7 +421,8 @@ struct TaskListView: View {
                 let prevStart = utf8[..<prevEnd]
                     .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
                     .map { utf8.index(after: $0) } ?? markdown.startIndex
-                let isBlank = utf8[prevStart..<prevEnd].allSatisfy { $0 == 0x20 || $0 == 0x09 }
+                // Treat whitespace-only and blockquote-prefix-only (">") lines as blank
+                let isBlank = utf8[prevStart..<prevEnd].allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x3E }
                 if isBlank {
                     cursor = prevStart
                     continue
