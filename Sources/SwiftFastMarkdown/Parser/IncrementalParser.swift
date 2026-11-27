@@ -275,7 +275,10 @@ private final class IncrementalState: @unchecked Sendable {
                 ) {
                     stableCount += k
                     stableEndOffset = cut
-                    lastOrdinal = parsed.lastOrdinal
+                    // `MD4CParser` assigns ordinals in post-order (`leaveBlockCallback`), so the
+                    // last stabilized top-level block holds the exact max ordinal in `0 ..< k`,
+                    // keeping pending block IDs stable across `append` and `finalize`.
+                    lastOrdinal = parsed.blocks[k - 1].id.ordinal
                     break
                 }
             }

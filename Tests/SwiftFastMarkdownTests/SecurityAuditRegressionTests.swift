@@ -348,6 +348,12 @@ struct SecurityAuditRegressionTests {
         let crlfParser = IncrementalMarkdownParser()
         _ = crlfParser.append("Paragraph one.\r\n\r\nParagraph two.\r\n")
         #expect(crlfParser.stableBlockCount >= 1, "CRLF blank lines should stabilize completed blocks")
+
+        // Pending block IDs must remain stable across append and finalize (no SwiftUI ForEach churn)
+        let stableIDParser = IncrementalMarkdownParser()
+        let appendedDoc = stableIDParser.append("A\n\nB\n")
+        let finalizedDoc = stableIDParser.finalize()
+        #expect(appendedDoc.blocks.map(\.id) == finalizedDoc.blocks.map(\.id))
     }
 
     // MARK: - 7. IncrementalMarkdownParser documentID freshness with cached renderers
