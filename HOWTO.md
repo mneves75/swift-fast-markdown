@@ -374,12 +374,21 @@ struct TaskListView: View {
     }
 
     private func updateTaskItem(_ item: ListItemBlock, isChecked: Bool) {
-        // Guard to items whose first child is a direct non-empty paragraph so an empty
+        // Find the first non-empty direct paragraph before any nested list/block so an empty
         // parent task item with a nested child task list never toggles a child's checkbox
-        guard case .paragraph(let firstParagraph) = item.blocks.first,
-              !firstParagraph.range.isEmpty else {
-            return
+        var anchorParagraph: ParagraphBlock?
+        for block in item.blocks {
+            switch block {
+            case .paragraph(let para) where !para.range.isEmpty:
+                anchorParagraph = para
+            case .paragraph:
+                continue
+            default:
+                break
+            }
+            break
         }
+        guard let firstParagraph = anchorParagraph else { return }
 
         // Locate the checkbox marker on the paragraph's line, or on the immediately
         // preceding line when the label wraps onto the line below the task marker
