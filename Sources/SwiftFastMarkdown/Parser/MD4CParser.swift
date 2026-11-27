@@ -371,6 +371,33 @@ private final class ParserContext {
         return spanChildren.takeArray(from: frame.childStart)
     }
 
+    /// Opens an implicit paragraph frame when md4c emits inline content directly
+    /// inside a tight list item (`md4c.c:4850` omits `MD_BLOCK_P` for tight lists)
+    /// or inside a depth-flattened container.
+    @inline(__always)
+    private func ensureImplicitParagraphIfNeeded() {
+        guard spanStack.isEmpty, let top = blockStack.last else { return }
+        switch top.kind {
+        case .listItem, .blockQuote, .doc:
+            beginInlineBlock()
+            blockStack.append(BlockFrame(kind: .implicitParagraph, childStart: 0))
+        default:
+            break
+        }
+    }
+
+    /// Flushes an active implicit paragraph frame into its enclosing block container.
+    @inline(__always)
+    private func closeImplicitParagraphIfNeeded() {
+        guard let top = blockStack.last, case .implicitParagraph = top.kind else { return }
+        _ = blockStack.popLast()
+        let spans = endInlineBlock()
+        let range = top.resolvedRange
+        let id = nextID(kind: .paragraph, range: range)
+        propagateRangeToParent(top)
+        appendBlock(.paragraph(ParagraphBlock(id: id, spans: spans, range: range)))
+    }
+
     @inline(__always)
     private func appendSpan(_ span: MarkdownSpan) {
         guard !spanStack.isEmpty else { return }
@@ -438,6 +465,10 @@ private final class ParserContext {
     static let enterBlockCallback: @convention(c) (MD_BLOCKTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { type, detail, userdata in
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
+
+        if type != MD_BLOCK_DOC {
+            context.closeImplicitParagraphIfNeeded()
+        }
 
         switch type {
         case MD_BLOCK_DOC:
@@ -569,7 +600,11 @@ private final class ParserContext {
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
 
         switch type {
+        case MD_BLOCK_DOC:
+            context.closeImplicitParagraphIfNeeded()
+
         case MD_BLOCK_QUOTE:
+            context.closeImplicitParagraphIfNeeded()
             if context.skippedContainers.last == type.rawValue {
                 context.skippedContainers.removeLast()
                 return 0
@@ -602,6 +637,7 @@ private final class ParserContext {
             )))
 
         case MD_BLOCK_LI:
+            context.closeImplicitParagraphIfNeeded()
             if context.skippedContainers.last == type.rawValue {
                 context.skippedContainers.removeLast()
                 return 0
@@ -703,6 +739,8 @@ private final class ParserContext {
     static let enterSpanCallback: @convention(c) (MD_SPANTYPE, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32 = { type, detail, userdata in
         guard let userdata else { return 0 }
         let context = Unmanaged<ParserContext>.fromOpaque(userdata).takeUnretainedValue()
+
+        context.ensureImplicitParagraphIfNeeded()
 
         if !context.skippedSpans.isEmpty || context.spanStack.count >= MD4CParser.maxNestingDepth {
             context.skippedSpans.append(type.rawValue)
@@ -846,50 +884,62 @@ private final class ParserContext {
 
         switch type {
         case MD_TEXT_NORMAL:
+            context.ensureImplicitParagraphIfNeeded()
             if let range = context.pointerRange(text, size: size) {
                 context.appendInlineByteRange(range)
             }
 
         case MD_TEXT_CODE:
             if let range = context.pointerRange(text, size: size) {
-                context.recordRangeOnTopBlock(range)
-                if let topSpan = context.spanStack.last, topSpan.isCodeLike {
-                    context.appendCoalescedRange(to: context.inlineCodeRanges, startIndex: topSpan.codeRangeStart, range: range)
-                } else if let topBlock = context.blockStack.last, case .codeBlock = topBlock.kind {
+                if let topBlock = context.blockStack.last, case .codeBlock = topBlock.kind {
+                    context.recordRangeOnTopBlock(range)
                     context.appendCoalescedRange(to: context.textRanges, startIndex: topBlock.childStart, range: range)
                 } else {
-                    context.appendSpan(.code(.bytes(range)))
+                    context.ensureImplicitParagraphIfNeeded()
+                    context.recordRangeOnTopBlock(range)
+                    if let topSpan = context.spanStack.last, topSpan.isCodeLike {
+                        context.appendCoalescedRange(to: context.inlineCodeRanges, startIndex: topSpan.codeRangeStart, range: range)
+                    } else {
+                        context.appendSpan(.code(.bytes(range)))
+                    }
                 }
             }
 
         case MD_TEXT_SOFTBR:
+            context.ensureImplicitParagraphIfNeeded()
             context.appendSpan(.softBreak)
 
         case MD_TEXT_BR:
+            context.ensureImplicitParagraphIfNeeded()
             context.appendSpan(.lineBreak)
 
         case MD_TEXT_ENTITY:
+            context.ensureImplicitParagraphIfNeeded()
             if !context.spanStack.isEmpty {
                 let decoded = context.decodeEntity(text, size: size)
                 context.appendSpan(.text(.string(decoded)))
             }
 
         case MD_TEXT_NULLCHAR:
+            context.ensureImplicitParagraphIfNeeded()
             if !context.spanStack.isEmpty {
                 context.appendSpan(.text(.string("\u{FFFD}")))
             }
 
         case MD_TEXT_HTML:
             if let range = context.pointerRange(text, size: size) {
-                context.recordRangeOnTopBlock(range)
                 if let topBlock = context.blockStack.last, case .htmlBlock = topBlock.kind {
+                    context.recordRangeOnTopBlock(range)
                     context.appendCoalescedRange(to: context.textRanges, startIndex: topBlock.childStart, range: range)
                 } else {
+                    context.ensureImplicitParagraphIfNeeded()
+                    context.recordRangeOnTopBlock(range)
                     context.appendSpan(.html(.bytes(range)))
                 }
             }
 
         case MD_TEXT_LATEXMATH:
+            context.ensureImplicitParagraphIfNeeded()
             if let range = context.pointerRange(text, size: size) {
                 context.recordRangeOnTopBlock(range)
                 if let topSpan = context.spanStack.last, topSpan.isLatexLike {
@@ -900,6 +950,7 @@ private final class ParserContext {
             }
 
         default:
+            context.ensureImplicitParagraphIfNeeded()
             if let range = context.pointerRange(text, size: size) {
                 context.appendInlineByteRange(range)
             }
@@ -936,6 +987,7 @@ private enum BlockFrameKind {
     case list(ordered: Bool, start: Int, delimiter: Character?, isTight: Bool)
     case listItem(isTask: Bool, isChecked: Bool)
     case paragraph
+    case implicitParagraph
     case heading(level: Int)
     case codeBlock(info: TextContent?, language: TextContent?, fence: Character?)
     case htmlBlock

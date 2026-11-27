@@ -9,7 +9,7 @@ Built with [Carmack-level rigor](https://www.youtube.com/watch?v=I845O57ZSy4): m
 - **Blazing Fast**: md4c-based parser achieves sub-millisecond parsing for typical documents
 - **Zero-Copy IR**: ByteRange references into source data minimize allocations
 - **SwiftUI Native**: First-class SwiftUI views with stable identity for efficient diffing
-- **Streaming Support**: Incremental single-buffer parser that stabilizes completed top-level prefixes at blank-line boundaries before newline-terminated paragraphs, headings, block quotes, and tables (linear amortized on typical multi-block streams)
+- **Streaming Support**: Incremental single-buffer parser that stabilizes completed top-level prefixes at blank-line boundaries before newline-terminated paragraphs, headings, block quotes, and tables (linear amortized parsing on typical multi-block streams; retaining prior `MarkdownDocument` snapshots across appends uses Swift Copy-on-Write)
 - **Render Caching**: CachedAttributedStringRenderer for near-instant repeated renders
 - **GFM Extensions**: Tables, task lists, strikethrough, autolinks via md4c flags
 - **Syntax Highlighting**: Pluggable protocol with thread-safe highlight.js implementation

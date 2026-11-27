@@ -447,5 +447,42 @@ struct SecurityAuditRegressionTests {
         let keyA = CodeBlockView.HighlightTaskKey(blockID: cbA.id, language: cbA.language?.string(in: docA.sourceData), code: cbA.content.string(in: docA.sourceData))
         let keyB = CodeBlockView.HighlightTaskKey(blockID: cbB.id, language: cbB.language?.string(in: docB.sourceData), code: cbB.content.string(in: docB.sourceData))
         #expect(keyA != keyB)
+
+        // Tight list items (where md4c omits MD_BLOCK_P) must preserve labels and non-zero offsets
+        let tightMD = "- first\n- **second** and `code`\n  - nested\n"
+        let fullTight = try MarkdownParser().parse(tightMD)
+        let incTightParser = IncrementalMarkdownParser()
+        _ = incTightParser.append(tightMD)
+        let incTight = incTightParser.finalize()
+        let renderer = AttributedStringRenderer()
+        let fullTightText = String(renderer.render(fullTight).characters)
+        let incTightText = String(renderer.render(incTight).characters)
+        #expect(fullTightText.contains("first"))
+        #expect(fullTightText.contains("second"))
+        #expect(fullTightText.contains("nested"))
+        #expect(incTightText == fullTightText)
+
+        // CRLF tight task list must preserve item.id.start > 0 so HOWTO checkbox toggling works
+        var taskMD = "- [X] done\r\n- [ ] todo\r\n"
+        let taskDoc = try MarkdownParser().parse(taskMD)
+        guard case .list(let taskList) = taskDoc.blocks.first, taskList.items.count == 2 else {
+            Issue.record("Expected 2-item task list")
+            return
+        }
+        #expect(taskList.items[0].isTask && taskList.items[0].isChecked)
+        #expect(taskList.items[0].id.start > 0)
+        #expect(taskList.items[1].isTask && !taskList.items[1].isChecked)
+        #expect(taskList.items[1].id.start > taskList.items[0].id.end)
+
+        let utf8 = taskMD.utf8
+        let contentOffset = min(Int(taskList.items[0].id.start), utf8.count)
+        let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
+        let lineStart = utf8[..<contentIndex].lastIndex(of: 0x0A).map { utf8.index(after: $0) } ?? taskMD.startIndex
+        let markerRange = ["[x]", "[X]"].lazy.compactMap { taskMD.range(of: $0, range: lineStart..<contentIndex) }.first
+        #expect(markerRange != nil)
+        if let markerRange {
+            taskMD.replaceSubrange(markerRange, with: "[ ]")
+        }
+        #expect(taskMD == "- [ ] done\r\n- [ ] todo\r\n")
     }
 }
