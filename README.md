@@ -182,7 +182,8 @@ parser and renderers enforce defense-in-depth by default:
   or unknown-language `highlightAuto` calls while setting `ignoreIllegals = true`;
   pinned `Highlightr 2.3.0` / `highlight.js 11.11.1` retains internal sub-language
   auto-detection for multi-language grammars like `http` and its own `isUndefined`
-  fallback), caps input at 64 KiB (`maxHighlightBytes`), checks `Task.isCancelled`,
+  fallback), enforces a configurable input byte cap (`maxHighlightBytes`,
+  default 64 KiB), checks `Task.isCancelled`,
   and pools at most 4 JSC VMs (clearable via `SyntaxHighlightingFactory.clearSharedPool()`).
 - **No unsafe build flags**, so bounds and overflow checks stay enabled in the
   parser's hot paths.

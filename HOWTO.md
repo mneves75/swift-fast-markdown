@@ -400,18 +400,27 @@ struct TaskListView: View {
 
         if let markerRange = findMarker(lineStart..<contentIndex) {
             markdown.replaceSubrange(markerRange, with: replacement)
-        } else if lineStart > markdown.startIndex {
-            // Check the immediately preceding line (e.g., "- [ ]\r\n  &copy;\r\n")
-            var prevEnd = utf8.index(before: lineStart)
-            if utf8[prevEnd] == 0x0A && prevEnd > markdown.startIndex {
-                let beforeLF = utf8.index(before: prevEnd)
-                if utf8[beforeLF] == 0x0D { prevEnd = beforeLF }
-            }
-            let prevStart = utf8[..<prevEnd]
-                .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
-                .map { utf8.index(after: $0) } ?? markdown.startIndex
-            if let markerRange = findMarker(prevStart..<prevEnd) {
-                markdown.replaceSubrange(markerRange, with: replacement)
+        } else {
+            // Walk back past any blank lines to the task marker line (e.g., "- [ ]\r\n\r\n  &copy;\r\n")
+            var cursor = lineStart
+            while cursor > markdown.startIndex {
+                var prevEnd = utf8.index(before: cursor)
+                if utf8[prevEnd] == 0x0A && prevEnd > markdown.startIndex {
+                    let beforeLF = utf8.index(before: prevEnd)
+                    if utf8[beforeLF] == 0x0D { prevEnd = beforeLF }
+                }
+                let prevStart = utf8[..<prevEnd]
+                    .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
+                    .map { utf8.index(after: $0) } ?? markdown.startIndex
+                let isBlank = utf8[prevStart..<prevEnd].allSatisfy { $0 == 0x20 || $0 == 0x09 }
+                if isBlank {
+                    cursor = prevStart
+                    continue
+                }
+                if let markerRange = findMarker(prevStart..<prevEnd) {
+                    markdown.replaceSubrange(markerRange, with: replacement)
+                }
+                break
             }
         }
     }
