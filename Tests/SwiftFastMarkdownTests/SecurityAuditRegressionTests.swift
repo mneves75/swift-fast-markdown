@@ -322,15 +322,15 @@ struct SecurityAuditRegressionTests {
             #expect(String(singleRendered.characters) == expectedText, "Single-append text mismatch for: \(md.debugDescription)")
         }
 
-        // Byte-by-byte streaming check for bare CR around thematic breaks (CommonMark §2.2)
-        for bareCR in ["A\n\n---\rB\n", "A\r\r---\rB\r\rC\r"] {
-            let expectedDoc = try fullParser.parse(bareCR)
+        // Byte-by-byte streaming check for bare CR and thematic-break AST parity (CommonMark §2.2)
+        for sample in ["A\n\n---\rB\n", "A\r\r---\rB\r\rC\r", "- > b\r\n\r\n> > e\r\n---"] {
+            let expectedDoc = try fullParser.parse(sample)
             let byteInc = IncrementalMarkdownParser()
-            for b in bareCR.utf8 {
+            for b in sample.utf8 {
                 _ = byteInc.append(Data([b]))
             }
             let byteDoc = byteInc.finalize()
-            #expect(byteDoc.blocks.count == expectedDoc.blocks.count, "Bytewise bare-CR block count mismatch for: \(bareCR.debugDescription)")
+            #expect(byteDoc.blocks == expectedDoc.blocks, "Bytewise AST mismatch for: \(sample.debugDescription)")
             #expect(String(renderer.render(byteDoc).characters) == String(renderer.render(expectedDoc).characters))
         }
 

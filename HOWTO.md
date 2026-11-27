@@ -374,27 +374,36 @@ struct TaskListView: View {
     }
 
     private func updateTaskItem(_ item: ListItemBlock, isChecked: Bool) {
-        // Find the first non-empty direct paragraph before any nested list/block so an empty
-        // parent task item with a nested child task list never toggles a child's checkbox
-        var anchorParagraph: ParagraphBlock?
+        // Find the first direct non-empty leaf block (paragraph, heading, code, HTML, or table)
+        // before any nested container so an empty parent task item with a nested child list
+        // never toggles a child's checkbox (empty or container-only parent tasks are skipped)
+        var anchorStart: UInt32?
         for block in item.blocks {
             switch block {
             case .paragraph(let para) where !para.range.isEmpty:
-                anchorParagraph = para
-            case .paragraph:
+                anchorStart = para.range.start
+            case .heading(let heading) where !heading.range.isEmpty:
+                anchorStart = heading.range.start
+            case .codeBlock(let code) where code.id.end > code.id.start:
+                anchorStart = code.id.start
+            case .htmlBlock(let html) where html.id.end > html.id.start:
+                anchorStart = html.id.start
+            case .table(let table) where table.id.end > table.id.start:
+                anchorStart = table.id.start
+            case .paragraph, .heading, .codeBlock, .htmlBlock, .table, .thematicBreak:
                 continue
-            default:
+            case .list, .blockQuote:
                 break
             }
             break
         }
-        guard let firstParagraph = anchorParagraph else { return }
+        guard let anchorStart else { return }
 
-        // Locate the checkbox marker on the paragraph's line, or on the immediately
-        // preceding line when the label wraps onto the line below the task marker
-        // (searching UTF-8 bytes so LF, CRLF, and bare CR line endings work accurately)
+        // Locate the checkbox marker on the anchor block's line, or walk back past any blank
+        // or blockquote-prefix-only lines to the task marker line (searching UTF-8 bytes so
+        // LF, CRLF, and bare CR line endings work accurately)
         let utf8 = markdown.utf8
-        let contentOffset = min(Int(firstParagraph.range.start), utf8.count)
+        let contentOffset = min(Int(anchorStart), utf8.count)
         let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
         let lineStart = utf8[..<contentIndex]
             .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })

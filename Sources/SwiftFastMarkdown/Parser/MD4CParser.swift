@@ -652,7 +652,7 @@ private final class ParserContext {
 
         case MD_BLOCK_HR:
             guard let frame = context.blockStack.popLast() else { return 0 }
-            let range = ByteRange(start: context.baseOffset, end: context.baseOffset)
+            let range = ByteRange(start: 0, end: 0)
             let id = context.nextID(kind: .thematicBreak, range: range)
             context.propagateRangeToParent(frame)
             context.appendBlock(.thematicBreak(ThematicBreakBlock(id: id, range: range)))
