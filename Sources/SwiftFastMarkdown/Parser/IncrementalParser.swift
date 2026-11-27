@@ -6,7 +6,7 @@ import Foundation
 /// 1. Appends incoming bytes into a single contiguous `sourceData: Data` buffer (bounded by `MD4CParser.maxInputByteCount`).
 /// 2. Parses only the uncommitted pending suffix (`stableEndOffset ..< sourceData.count`) once via `MD4CParser.parseSlice(..., baseOffset:startingOrdinal:scratch:)`.
 /// 3. Stabilizes completed top-level blocks directly from `md4c`'s own AST whenever a subsequent top-level block (`.paragraph`, `.heading`, `.blockQuote`, or `.table`) begins on a line immediately preceded by a blank line and terminated by a CommonMark §2.2 line ending (`\n`, `\r\n`, or bare `\r` followed by another byte) — guaranteeing block-structure parity with full `md4c` parsing across nested containers, fenced code blocks, and HTML blocks without maintaining a duplicate CommonMark state machine (note: link reference definitions spanning separate stabilized chunks require full-document parsing).
-/// 4. Replaces only the uncommitted pending suffix in `cachedBlocks` in place (O(1) when uniquely referenced, CoW-isolated if the caller retains an earlier snapshot).
+/// 4. Replaces only the uncommitted pending suffix in `cachedBlocks` in place (O(pendingBlocks) when uniquely referenced, CoW-isolated if the caller retains an earlier snapshot).
 public final class IncrementalMarkdownParser: Sendable {
 
     /// Configuration for incremental parsing.
@@ -73,8 +73,8 @@ public final class IncrementalMarkdownParser: Sendable {
 ///   bounded at `MD4CParser.maxInputByteCount`.
 /// - Single `cachedBlocks: [MarkdownBlock]` array whose prefix `0..<stableCount`
 ///   holds finalized blocks and whose suffix `stableCount...` is replaced in
-///   place on each chunk — O(1) when uniquely referenced, and automatically
-///   CoW-isolated if the caller retains a prior `MarkdownDocument`.
+///   place on each chunk — O(pendingBlocks) when uniquely referenced, and
+///   automatically CoW-isolated if the caller retains a prior `MarkdownDocument`.
 /// - Reusable `MD4CParser.ReusableScratch` eliminates per-chunk parser buffer
 ///   allocations.
 /// - Stabilization decisions are derived directly from `md4c`'s own parsed

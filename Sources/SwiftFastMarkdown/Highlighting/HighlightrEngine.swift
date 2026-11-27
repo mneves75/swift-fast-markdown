@@ -44,8 +44,11 @@ public actor HighlightrEngine: SyntaxHighlighting {
 
     internal static let defaultTheme = "atom-one-dark"
 
-    /// Grammars blocked from JavaScriptCore execution due to known upstream
+    /// Grammars blocked from direct selection in Swift due to known upstream
     /// ReDoS advisories in bundled highlight.js 11.11.1 (e.g. CVE-2026-133937).
+    /// Note: pinned Highlightr 2.3.0 / highlight.js 11.11.1 retains internal
+    /// sub-language auto-detection for multi-language grammars such as `"http"`
+    /// and its own `isUndefined` fallback.
     internal static let blockedLanguages: Set<String> = ["livescript", "ls"]
 
     /// Highlightr 2.3.0 CSS themes whose `.hljs` background uses a named CSS color
