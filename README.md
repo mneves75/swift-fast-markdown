@@ -132,7 +132,7 @@ dependencies: [
 │  Layer 2: IR (Intermediate Representation)                  │
 │  ├── MarkdownDocument (Sendable, Equatable)                 │
 │  ├── MarkdownBlock (stable IDs for SwiftUI diffing)         │
-│  └── ByteRange (zero-copy string extraction)                │
+│  └── ByteRange (offset-based IR; lazy UTF-8 decoding)       │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 1: Parser                                            │
 │  ├── md4c (CommonMark 0.31 + GFM extensions)                │

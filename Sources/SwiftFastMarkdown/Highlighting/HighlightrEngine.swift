@@ -62,7 +62,7 @@ public actor HighlightrEngine: SyntaxHighlighting {
         "ts": "typescript", "tsx": "typescript", "mts": "typescript", "cts": "typescript",
         "py": "python", "py3": "python",
         "rb": "ruby",
-        "sh": "bash", "zsh": "bash", "shell": "bash",
+        "sh": "bash", "zsh": "bash",
         "yml": "yaml",
         "md": "markdown", "mkdown": "markdown", "mkd": "markdown",
         "rs": "rust",
@@ -72,7 +72,7 @@ public actor HighlightrEngine: SyntaxHighlighting {
         "h": "c",
         "objc": "objectivec", "obj-c": "objectivec", "mm": "objectivec",
         "html": "xml", "htm": "xml", "xhtml": "xml", "svg": "xml", "plist": "xml", "rss": "xml",
-        "dockerfile": "dockerfile", "docker": "dockerfile",
+        "docker": "dockerfile",
         "golang": "go",
         "ps": "powershell", "ps1": "powershell", "pwsh": "powershell",
         "txt": "plaintext", "text": "plaintext",
@@ -154,7 +154,11 @@ public actor HighlightrEngine: SyntaxHighlighting {
         guard !Self.blockedLanguages.contains(rawLower) else {
             return AttributedString(code)
         }
-        let normalizedLanguage = Self.languageAliases[rawLower] ?? rawLower
+        // Prefer canonical highlight.js language names before alias lookup so an alias
+        // never shadows a bundled canonical grammar (e.g. "shell" = Shell Session).
+        let normalizedLanguage = allowedLanguageSet.contains(rawLower)
+            ? rawLower
+            : (Self.languageAliases[rawLower] ?? rawLower)
         guard allowedLanguageSet.contains(normalizedLanguage) else {
             return AttributedString(code)
         }

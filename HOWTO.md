@@ -655,7 +655,7 @@ if case .paragraph(let para) = document.blocks.first,
        return false
    }),
    case .text(let content) = children.first {
-    // Zero-copy string extraction
+    // Decode UTF-8 slice on demand from sourceData
     let text = content.string(in: document.sourceData)
     print(text) // "World"
 }
