@@ -374,13 +374,16 @@ struct TaskListView: View {
     }
 
     private func updateTaskItem(_ item: ListItemBlock, isChecked: Bool) {
+        // Guard against empty or NUL-only items whose source range is unavailable from md4c
+        guard item.id.end > item.id.start else { return }
+
         // Locate the checkbox marker on the line preceding the item's first content byte
-        // (searching UTF-8 bytes so CRLF "\r\n" line endings are handled accurately)
+        // (searching UTF-8 bytes so LF, CRLF, and bare CR line endings are handled accurately)
         let utf8 = markdown.utf8
         let contentOffset = min(Int(item.id.start), utf8.count)
         let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
         let lineStart = utf8[..<contentIndex]
-            .lastIndex(of: 0x0A)
+            .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
             .map { utf8.index(after: $0) } ?? markdown.startIndex
 
         let candidates = isChecked ? ["[ ]"] : ["[x]", "[X]"]

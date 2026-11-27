@@ -314,12 +314,27 @@ private final class IncrementalState: @unchecked Sendable {
         let start = Int(blockID.start)
         guard start > minOffset && start < totalCount else { return nil }
 
-        // First line of `block` must already end with '\n' so it cannot mutate on later bytes.
-        guard memchr(base + start, 0x0A, totalCount - start) != nil else { return nil }
+        // First line of `block` must already end with a CommonMark §2.2 line ending
+        // ('\n', "\r\n", or bare '\r' followed by another byte so split CRLF waits).
+        var hasLineEnding = false
+        var scan = start
+        while scan < totalCount {
+            let b = base[scan]
+            if b == 0x0A {
+                hasLineEnding = true
+                break
+            }
+            if b == 0x0D && scan + 1 < totalCount {
+                hasLineEnding = true
+                break
+            }
+            scan += 1
+        }
+        guard hasLineEnding else { return nil }
 
-        // Scan backward to column 0 of the line containing `start`.
+        // Scan backward to column 0 of the line containing `start` (respecting '\n' and bare '\r').
         var cut = start
-        while cut > minOffset && base[cut - 1] != 0x0A {
+        while cut > minOffset && base[cut - 1] != 0x0A && base[cut - 1] != 0x0D {
             cut -= 1
         }
         guard cut > minOffset else { return nil }
@@ -330,13 +345,13 @@ private final class IncrementalState: @unchecked Sendable {
             return nil
         }
 
-        // Verify the line immediately before `cut` is blank (spaces/tabs only, optional trailing '\r').
-        var prevLineEnd = cut - 1 // points at '\n'
-        if prevLineEnd > minOffset && base[prevLineEnd - 1] == 0x0D {
+        // Verify the line immediately before `cut` is blank (spaces/tabs only, LF/CRLF/bare-CR aware).
+        var prevLineEnd = cut - 1 // points at '\n' or bare '\r'
+        if base[prevLineEnd] == 0x0A && prevLineEnd > minOffset && base[prevLineEnd - 1] == 0x0D {
             prevLineEnd -= 1
         }
         var p = prevLineEnd
-        while p > minOffset && base[p - 1] != 0x0A {
+        while p > minOffset && base[p - 1] != 0x0A && base[p - 1] != 0x0D {
             p -= 1
             let b = base[p]
             if b != 0x20 && b != 0x09 {

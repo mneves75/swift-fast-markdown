@@ -25,18 +25,18 @@ dependency and keeps bounds/overflow checks for untrusted input.
 
 | Operation | Median | p95 | Target (median) | Status |
 |-----------|-------:|----:|-----------------|--------|
-| Parse ~1KB | 0.005 ms | 0.006 ms | — | — |
-| Parse ~10KB | 0.138 ms | 0.481 ms | < 1 ms | ✅ 7.2× better |
-| Parse ~50KB | 0.309 ms | 4.160 ms | — | — |
-| Parse entity-heavy (~10KB) | 0.146 ms | 7.214 ms | — | — |
+| Parse ~1KB (178 B) | 0.005 ms | 0.006 ms | — | — |
+| Parse ~10KB (10,232 B) | 0.138 ms | 0.481 ms | < 1 ms | ✅ 7.2× better |
+| Parse large (77.6 KB / 77,644 B) | 0.309 ms | 4.160 ms | — | — |
+| Parse entity-heavy (11.2 KB) | 0.146 ms | 7.214 ms | — | — |
 | Render ~10KB → AttributedString | 0.867 ms | 6.027 ms | < 5 ms | ✅ 5.8× better |
-| Render ~50KB → AttributedString | 9.584 ms | 107.911 ms | — | 199 KB retained |
+| Render large (77.6 KB) → AttributedString | 9.584 ms | 107.911 ms | — | 199 KB retained |
 | RenderInline (50 paragraphs) | 0.446 ms | 5.021 ms | — | — |
 | Streaming chunk append (256 B) | 0.008 ms | 0.010 ms | < 0.5 ms | ✅ 62× better |
-| AI-token stream ~50KB (1,214 × 64 B) | 2.876 ms | 4.725 ms | — | 1.7 µs/token |
+| AI-token stream large (77.6 KB, 1,214 × 64 B) | 2.876 ms | 4.725 ms | — | 1.7 µs/token |
 | `SyntaxHighlightingFactory.makeDefault()` | < 0.001 ms | < 0.001 ms | — | Bounded lazy pool |
 
-100 iterations + 10 warmup per operation (50 for 50KB render, 10 for 50KB
+100 iterations + 10 warmup per operation (50 for 77.6 KB render, 10 for 77.6 KB
 token stream), Apple Silicon release build. Reproduce with:
 
 ```bash
@@ -70,9 +70,9 @@ Earlier releases applied `-Ounchecked`, `-disable-actor-data-race-checks`,
 
 | Technique | Impact |
 |-----------|--------|
-| Flat LIFO `ScratchStack` (`moveInitialize`) + contiguous `ByteRange` coalescing | 14.9× faster 50KB parse, zero O(n²) array copies, zero ARC churn |
+| Flat LIFO `ScratchStack` (`moveInitialize`) + contiguous `ByteRange` coalescing | 14.9× faster 77.6 KB parse, zero O(n²) array copies, zero ARC churn |
 | Single-pass UTF-8 builder + prebuilt `StylePalette` + POD `RunPatch` | 12.3× faster 10KB render, 5× smaller retained `AttributedString` heap |
-| Single-buffer `IncrementalMarkdownParser` + `md4c`-backed stabilization + in-place CoW `cachedBlocks` | 12.2× faster 50KB AI-token streaming (1.7 µs/token) with `md4c` block-structure parity |
+| Single-buffer `IncrementalMarkdownParser` + `md4c`-backed stabilization + in-place CoW `cachedBlocks` | 12.2× faster 77.6 KB AI-token streaming (1.7 µs/token) with `md4c` block-structure parity |
 | Compact binary `HTMLEntities.bin` (28.7 KB vs 146 KB JSON) + zero-alloc fast path | 5.1× smaller resource, 5.3× faster entity-heavy parse |
 | Lazy shared `HighlightrPool` + O(1) `LRUCache` in cached renderers | Zero main-thread JSContext stall on SwiftUI view init (16× lower process RAM) |
 

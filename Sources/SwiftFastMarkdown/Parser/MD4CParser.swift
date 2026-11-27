@@ -924,10 +924,9 @@ private final class ParserContext {
             }
 
         case MD_TEXT_NULLCHAR:
+            // Note: md4c passes a static C literal pointer for MD_TEXT_NULLCHAR rather than
+            // a pointer inside the source buffer, so source byte ranges are unavailable for NUL-only items.
             context.ensureImplicitParagraphIfNeeded()
-            if let range = context.pointerRange(text, size: size) {
-                context.recordRangeOnTopBlock(range)
-            }
             if !context.spanStack.isEmpty {
                 context.appendSpan(.text(.string("\u{FFFD}")))
             }

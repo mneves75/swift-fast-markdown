@@ -267,6 +267,9 @@ struct SecurityAuditRegressionTests {
             "- - <pre>\n</style>\n  ```\n\nalpha\n\n```\n\nbeta\n",
             "> - <scripture>\n  > ```\n  ```\n\nalpha\n\n```\n\nbeta\n",
             "- > <style>\n    ```\n\n```\n\nalpha\n\nbeta\n",
+            // CommonMark §2.2 bare-CR line endings must not duplicate blocks across streaming boundaries:
+            "A\n\n---\rB\n",
+            "A\r\r---\rB\r\rC\r",
         ]
         // Combinatorial matrix covering container openers × dedent/closing lines × follow-ups (300+ cases)
         let openers = [
@@ -317,6 +320,18 @@ struct SecurityAuditRegressionTests {
             let singleRendered = renderer.render(singleDoc)
             #expect(singleDoc.blocks.count == expectedDoc.blocks.count, "Single-append block count mismatch for: \(md.debugDescription)")
             #expect(String(singleRendered.characters) == expectedText, "Single-append text mismatch for: \(md.debugDescription)")
+        }
+
+        // Byte-by-byte streaming check for bare CR around thematic breaks (CommonMark §2.2)
+        for bareCR in ["A\n\n---\rB\n", "A\r\r---\rB\r\rC\r"] {
+            let expectedDoc = try fullParser.parse(bareCR)
+            let byteInc = IncrementalMarkdownParser()
+            for b in bareCR.utf8 {
+                _ = byteInc.append(Data([b]))
+            }
+            let byteDoc = byteInc.finalize()
+            #expect(byteDoc.blocks.count == expectedDoc.blocks.count, "Bytewise bare-CR block count mismatch for: \(bareCR.debugDescription)")
+            #expect(String(renderer.render(byteDoc).characters) == String(renderer.render(expectedDoc).characters))
         }
 
         // List continuation followed by top-level paragraphs must stabilize before finalize()
