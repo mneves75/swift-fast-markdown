@@ -216,6 +216,7 @@ class ChatViewModel: ObservableObject {
 let customStyle = MarkdownStyle(
     // Typography
     baseFont: .body,
+    codeFont: .system(.body, design: .monospaced),
     headingFonts: [
         .system(size: 32, weight: .bold),    // H1
         .system(size: 28, weight: .bold),    // H2
@@ -224,18 +225,17 @@ let customStyle = MarkdownStyle(
         .system(size: 18, weight: .medium),   // H5
         .system(size: 16, weight: .medium)    // H6
     ],
-    codeFont: .system(.body, design: .monospaced),
 
     // Colors
-    textColor: .primary,
     linkColor: .blue,
-    codeBackgroundColor: Color(.systemGray6),
-    blockQuoteColor: .secondary,
+    textColor: .primary,
+    codeTextColor: .primary,
+    codeBackgroundColor: Color.gray.opacity(0.15),
+    quoteStripeColor: .secondary,
 
     // Spacing
-    blockSpacing: 4,        // Base unit (multiplied by 4 for actual spacing)
-    listIndent: 6,          // Base unit for list indentation
-    codeBlockPadding: 4     // Base unit for code block padding
+    blockSpacing: 4,        // Blank-line / spacing unit between blocks
+    listIndent: 6           // Space count for nested list indentation
 )
 
 // Apply to view
@@ -250,13 +250,13 @@ struct AdaptiveMarkdownView: View {
     let document: MarkdownDocument
 
     var style: MarkdownStyle {
-        MarkdownStyle(
-            textColor: colorScheme == .dark ? .white : .black,
-            linkColor: colorScheme == .dark ? .cyan : .blue,
-            codeBackgroundColor: colorScheme == .dark
-                ? Color(.systemGray5)
-                : Color(.systemGray6)
-        )
+        var style = MarkdownStyle.default
+        style.textColor = colorScheme == .dark ? .white : .black
+        style.linkColor = colorScheme == .dark ? .cyan : .blue
+        style.codeBackgroundColor = colorScheme == .dark
+            ? Color.gray.opacity(0.25)
+            : Color.gray.opacity(0.12)
+        return style
     }
 
     var body: some View {
@@ -381,8 +381,9 @@ struct TaskListView: View {
             return
         }
 
-        // Locate the checkbox marker on the line preceding the paragraph's first content byte
-        // (searching UTF-8 bytes so LF, CRLF, and bare CR line endings are handled accurately)
+        // Locate the checkbox marker on the paragraph's line, or on the immediately
+        // preceding line when the label wraps onto the line below the task marker
+        // (searching UTF-8 bytes so LF, CRLF, and bare CR line endings work accurately)
         let utf8 = markdown.utf8
         let contentOffset = min(Int(firstParagraph.range.start), utf8.count)
         let contentIndex = utf8.index(utf8.startIndex, offsetBy: contentOffset)
@@ -393,10 +394,25 @@ struct TaskListView: View {
         let candidates = isChecked ? ["[ ]"] : ["[x]", "[X]"]
         let replacement = isChecked ? "[x]" : "[ ]"
 
-        if let markerRange = candidates.lazy.compactMap({
-            markdown.range(of: $0, range: lineStart..<contentIndex)
-        }).first {
+        let findMarker: (Range<String.Index>) -> Range<String.Index>? = { searchRange in
+            candidates.lazy.compactMap { markdown.range(of: $0, range: searchRange) }.first
+        }
+
+        if let markerRange = findMarker(lineStart..<contentIndex) {
             markdown.replaceSubrange(markerRange, with: replacement)
+        } else if lineStart > markdown.startIndex {
+            // Check the immediately preceding line (e.g., "- [ ]\r\n  &copy;\r\n")
+            var prevEnd = utf8.index(before: lineStart)
+            if utf8[prevEnd] == 0x0A && prevEnd > markdown.startIndex {
+                let beforeLF = utf8.index(before: prevEnd)
+                if utf8[beforeLF] == 0x0D { prevEnd = beforeLF }
+            }
+            let prevStart = utf8[..<prevEnd]
+                .lastIndex(where: { $0 == 0x0A || $0 == 0x0D })
+                .map { utf8.index(after: $0) } ?? markdown.startIndex
+            if let markerRange = findMarker(prevStart..<prevEnd) {
+                markdown.replaceSubrange(markerRange, with: replacement)
+            }
         }
     }
 }
@@ -492,10 +508,13 @@ struct PaginatedMarkdownView: View {
     @State private var visibleBlocks = 50
 
     var body: some View {
-        LazyVStack {
-            ForEach(document.blocks.prefix(visibleBlocks)) { block in
-                BlockContentView(block: block, ...)
-            }
+        LazyVStack(alignment: .leading) {
+            MarkdownView(
+                document: MarkdownDocument(
+                    blocks: Array(document.blocks.prefix(visibleBlocks)),
+                    sourceData: document.sourceData
+                )
+            )
 
             if visibleBlocks < document.blocks.count {
                 Button("Load More") {
@@ -646,9 +665,8 @@ struct CustomMarkdownView: View {
 
                 default:
                     // Default rendering for other blocks
-                    BlockContentView(
-                        block: block,
-                        source: document.sourceData,
+                    MarkdownView(
+                        document: MarkdownDocument(blocks: [block], sourceData: document.sourceData),
                         style: .default,
                         highlighter: SyntaxHighlightingFactory.makeDefault()
                     )
@@ -728,9 +746,9 @@ struct ChatMessageView: View {
     }
 
     var messageStyle: MarkdownStyle {
-        MarkdownStyle(
-            textColor: message.role == .user ? .primary : .secondary
-        )
+        var style = MarkdownStyle.default
+        style.textColor = message.role == .user ? .primary : .secondary
+        return style
     }
 }
 ```
